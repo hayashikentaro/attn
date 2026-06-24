@@ -1,0 +1,21 @@
+.DS_Store
+
+# Local AI/runtime state
+.taskdeck/
+
+# Secrets and machine-local config
+.env
+.env.*
+*.local
+
+# Swift and Xcode build output
+.build/
+build/
+DerivedData/
+
+# Xcode user state
+*.xcuserstate
+*.xcuserdata/
+
+# CocoaPods
+Pods/
