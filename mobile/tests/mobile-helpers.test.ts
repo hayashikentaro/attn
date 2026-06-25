@@ -10,6 +10,12 @@ import {
 } from "../src/api/gatewayClient";
 import { normalizeBackendUrl } from "../src/lib/backend";
 import { resolveItemUrlFromPayload } from "../src/lib/deepLinks";
+import {
+  clearPendingGatewayDecisionIntent,
+  loadPendingGatewayDecisionIntent,
+  pendingGatewayDecisionIntentStorageKey,
+  savePendingGatewayDecisionIntent
+} from "../src/lib/gatewayPendingIntentStorage";
 import { parseGatewayNotificationPayload } from "../src/lib/gatewayPayload";
 import {
   clearGatewayMobileSession,
@@ -176,6 +182,83 @@ describe("mobile helpers", () => {
         reason: "secret_like_url"
       });
     }
+  });
+
+  it("saves, loads, and clears pending gateway decision intents", async () => {
+    const storage = createMemoryGatewaySessionStorage();
+    const intent = {
+      decision_id: "dec_123",
+      decision_url: "https://decision-gateway.example.com/decisions/dec_123",
+      title: "Deployment approval",
+      summary: "Production deploy is waiting for a decision.",
+      urgency: "high" as const,
+      dedupe_key: "deploy:123",
+      occurred_at: "2026-06-25T10:00:00.000Z"
+    };
+
+    await savePendingGatewayDecisionIntent(
+      intent,
+      "https://decision-gateway.example.com",
+      storage
+    );
+
+    expect(storage.values.has(pendingGatewayDecisionIntentStorageKey)).toBe(true);
+    await expect(
+      loadPendingGatewayDecisionIntent(
+        "https://decision-gateway.example.com",
+        storage
+      )
+    ).resolves.toEqual(intent);
+
+    await clearPendingGatewayDecisionIntent(storage);
+
+    expect(storage.values.has(pendingGatewayDecisionIntentStorageKey)).toBe(
+      false
+    );
+    await expect(
+      loadPendingGatewayDecisionIntent(
+        "https://decision-gateway.example.com",
+        storage
+      )
+    ).resolves.toBeNull();
+  });
+
+  it("loads null for missing, malformed, or unsafe pending gateway intents", async () => {
+    const storage = createMemoryGatewaySessionStorage();
+
+    await expect(
+      loadPendingGatewayDecisionIntent(
+        "https://decision-gateway.example.com",
+        storage
+      )
+    ).resolves.toBeNull();
+
+    storage.values.set(pendingGatewayDecisionIntentStorageKey, "{");
+    await expect(
+      loadPendingGatewayDecisionIntent(
+        "https://decision-gateway.example.com",
+        storage
+      )
+    ).resolves.toBeNull();
+
+    storage.values.set(
+      pendingGatewayDecisionIntentStorageKey,
+      JSON.stringify({
+        decision_id: "dec_123",
+        decision_url: "https://attacker.example.com/decisions/dec_123",
+        title: "Deployment approval",
+        summary: "Production deploy is waiting for a decision.",
+        urgency: "high",
+        dedupe_key: "deploy:123",
+        occurred_at: "2026-06-25T10:00:00.000Z"
+      })
+    );
+    await expect(
+      loadPendingGatewayDecisionIntent(
+        "https://decision-gateway.example.com",
+        storage
+      )
+    ).resolves.toBeNull();
   });
 
   it("builds pairing and device payloads without server ingest tokens", () => {
