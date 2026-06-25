@@ -12,12 +12,18 @@ import {
 } from "react-native";
 import * as Notifications from "expo-notifications";
 import { pairDevice, registerDevice, unregisterDevice } from "./src/api/attnClient";
+import { exchangeGatewayPairingToken } from "./src/api/gatewayClient";
 import { getMobileConfig } from "./src/config";
 import { openAttnItemFromPayload } from "./src/openAttnItem";
 import { requestExpoPushToken } from "./src/push";
+import {
+  loadGatewayMobileSession,
+  saveGatewayMobileSession
+} from "./src/lib/gatewaySessionStorage";
 import { redactToken, tokenHashPreview } from "./src/lib/tokens";
 
 type RegistrationState = "idle" | "working" | "registered" | "unregistered" | "failed";
+type GatewaySessionState = "checking" | "missing" | "connected" | "failed";
 
 function Button({
   label,
@@ -44,13 +50,41 @@ export default function App() {
   const config = useMemo(() => getMobileConfig(), []);
   const [pushToken, setPushToken] = useState<string | null>(null);
   const [registeredHash, setRegisteredHash] = useState<string | null>(null);
-  const [pairingCode, setPairingCode] = useState("");
+  const [gatewayPairingCode, setGatewayPairingCode] = useState("");
+  const [legacyPairingCode, setLegacyPairingCode] = useState("");
   const [registrationToken, setRegistrationToken] = useState<string | null>(null);
   const [pairedSubscriberId, setPairedSubscriberId] = useState<string | null>(null);
   const [permissionStatus, setPermissionStatus] = useState("not requested");
+  const [gatewaySessionStatus, setGatewaySessionStatus] =
+    useState<GatewaySessionState>("checking");
+  const [gatewaySessionLabel, setGatewaySessionLabel] = useState<string | null>(null);
   const [registrationStatus, setRegistrationStatus] =
     useState<RegistrationState>("idle");
-  const [message, setMessage] = useState("Ready for device pairing.");
+  const [message, setMessage] = useState("Ready for Gateway pairing.");
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadStoredGatewaySession() {
+      const session = await loadGatewayMobileSession();
+      if (!mounted) {
+        return;
+      }
+
+      setGatewaySessionStatus(session ? "connected" : "missing");
+      setGatewaySessionLabel(session?.subject_label ?? null);
+    }
+
+    void loadStoredGatewaySession().catch(() => {
+      if (mounted) {
+        setGatewaySessionStatus("failed");
+      }
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     const subscription = Notifications.addNotificationResponseReceivedListener(
@@ -75,18 +109,54 @@ export default function App() {
     }
   }
 
-  async function pairCurrentDevice() {
-    if (!pairingCode.trim()) {
-      Alert.alert("Pairing code required", "Enter the code shown by Attn.");
+  async function pairGatewaySession() {
+    if (!gatewayPairingCode.trim()) {
+      Alert.alert("Pairing code required", "Enter the Gateway pairing code.");
+      return;
+    }
+    if (!config.gatewayBaseUrl) {
+      Alert.alert(
+        "Gateway URL missing",
+        "Configure EXPO_PUBLIC_DECISION_GATEWAY_BASE_URL."
+      );
+      return;
+    }
+
+    setGatewaySessionStatus("checking");
+    setMessage("Pairing this device with Decision Gateway.");
+
+    try {
+      const result = await exchangeGatewayPairingToken(config, {
+        pairingToken: gatewayPairingCode,
+        deviceName: "Attn mobile device",
+        metadata: {
+          app: "attn-mobile"
+        }
+      });
+
+      await saveGatewayMobileSession(result.mobile_session);
+      setGatewayPairingCode("");
+      setGatewaySessionStatus("connected");
+      setGatewaySessionLabel(result.mobile_session.subject_label ?? null);
+      setMessage("Decision Gateway session connected.");
+    } catch {
+      setGatewaySessionStatus("failed");
+      setMessage("Gateway pairing failed.");
+    }
+  }
+
+  async function pairLegacyAttnDevice() {
+    if (!legacyPairingCode.trim()) {
+      Alert.alert("Pairing code required", "Enter the legacy Attn pairing code.");
       return;
     }
 
     setRegistrationStatus("working");
-    setMessage("Pairing this device with Attn.");
+    setMessage("Pairing this device with legacy Attn registration.");
 
     try {
       const result = (await pairDevice(config, {
-        pairingCode,
+        pairingCode: legacyPairingCode,
         deviceName: "Attn mobile device",
         metadata: {
           app: "attn-mobile"
@@ -103,7 +173,7 @@ export default function App() {
       setRegistrationToken(result.registration_token);
       setPairedSubscriberId(result.subscriber_id);
       setRegistrationStatus("idle");
-      setMessage("Device paired. You can now register the push token.");
+      setMessage("Legacy device paired. You can now register the push token.");
     } catch (error) {
       setRegistrationStatus("failed");
       setMessage(error instanceof Error ? error.message : "Pairing failed.");
@@ -193,6 +263,16 @@ export default function App() {
         <View style={styles.panel}>
           <Text style={styles.label}>Backend URL</Text>
           <Text style={styles.value}>{config.backendUrl ?? "not configured"}</Text>
+          <Text style={styles.label}>Gateway URL</Text>
+          <Text style={styles.value}>{config.gatewayBaseUrl ?? "not configured"}</Text>
+          <Text style={styles.label}>Gateway session</Text>
+          <Text style={styles.value}>
+            {gatewaySessionStatus === "connected"
+              ? gatewaySessionLabel
+                ? `connected as ${gatewaySessionLabel}`
+                : "connected"
+              : gatewaySessionStatus}
+          </Text>
           <Text style={styles.label}>Permission</Text>
           <Text style={styles.value}>{permissionStatus}</Text>
           <Text style={styles.label}>Device registration</Text>
@@ -211,17 +291,30 @@ export default function App() {
           <TextInput
             autoCapitalize="characters"
             autoCorrect={false}
-            onChangeText={setPairingCode}
-            placeholder="Pairing code"
+            onChangeText={setGatewayPairingCode}
+            placeholder="Gateway pairing code"
             style={styles.input}
-            value={pairingCode}
+            value={gatewayPairingCode}
+          />
+          <Button
+            disabled={!config.gatewayBaseUrl || gatewaySessionStatus === "checking"}
+            label="Pair with Gateway"
+            onPress={pairGatewaySession}
+          />
+          <Button label="Request notification permission" onPress={requestPermission} />
+          <TextInput
+            autoCapitalize="characters"
+            autoCorrect={false}
+            onChangeText={setLegacyPairingCode}
+            placeholder="Legacy Attn pairing code"
+            style={styles.input}
+            value={legacyPairingCode}
           />
           <Button
             disabled={!config.backendUrl || registrationStatus === "working"}
-            label="Pair device"
-            onPress={pairCurrentDevice}
+            label="Pair legacy Attn device"
+            onPress={pairLegacyAttnDevice}
           />
-          <Button label="Request notification permission" onPress={requestPermission} />
           <Button
             disabled={
               !config.backendUrl ||

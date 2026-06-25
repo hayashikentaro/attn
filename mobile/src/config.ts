@@ -4,6 +4,7 @@ import { getMobilePublicConfig } from "./lib/publicEnv";
 interface ExpoExtra {
   attnBackendUrl?: string;
   attnTestItemUrl?: string;
+  decisionGatewayBaseUrl?: string;
   expoProjectId?: string;
 }
 
