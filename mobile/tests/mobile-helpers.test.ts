@@ -498,6 +498,109 @@ describe("mobile helpers", () => {
     });
   });
 
+  it("dry-runs the mocked gateway mobile decision flow", async () => {
+    const storage = createMemoryGatewaySessionStorage();
+    const gatewayBaseUrl = "https://decision-gateway.example.com";
+
+    const pairing = await exchangeGatewayPairingToken(
+      {
+        gatewayBaseUrl
+      },
+      {
+        pairingToken: "gateway_pairing_secret",
+        deviceName: "iPhone",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              mobile_session: {
+                session_token: "mobile_session_secret",
+                refresh_token: "refresh_secret",
+                expires_at: "2026-07-25T10:00:00.000Z",
+                gateway_origin: gatewayBaseUrl,
+                subject_label: "Operator"
+              },
+              gateway_origin: gatewayBaseUrl
+            }),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/json"
+              }
+            }
+          )
+      }
+    );
+
+    await saveGatewayMobileSession(pairing.mobile_session, storage);
+    await expect(loadGatewayMobileSession(storage)).resolves.toEqual(
+      pairing.mobile_session
+    );
+
+    const parsedPayload = parseGatewayNotificationPayload(
+      {
+        decision_id: "dec_123",
+        decision_url: `${gatewayBaseUrl}/decisions/dec_123`,
+        title: "Deployment approval",
+        summary: "Production deploy is waiting for a decision.",
+        urgency: "high",
+        dedupe_key: "deploy:123",
+        occurred_at: "2026-06-25T10:00:00.000Z"
+      },
+      gatewayBaseUrl
+    );
+
+    expect(parsedPayload.ok).toBe(true);
+    if (!parsedPayload.ok) {
+      throw new Error("Expected gateway payload to parse");
+    }
+
+    await savePendingGatewayDecisionIntent(
+      parsedPayload.payload,
+      gatewayBaseUrl,
+      storage
+    );
+    await expect(
+      loadPendingGatewayDecisionIntent(gatewayBaseUrl, storage)
+    ).resolves.toEqual(parsedPayload.payload);
+
+    const ticket = await createGatewayWebSessionTicket(
+      {
+        gatewayBaseUrl
+      },
+      {
+        mobileSessionToken: pairing.mobile_session.session_token,
+        intent: parsedPayload.payload,
+        fetchImpl: async (_input, init) => {
+          expect(init?.body).toBe(
+            JSON.stringify({
+              mobile_session_token: "mobile_session_secret",
+              decision_url: `${gatewayBaseUrl}/decisions/dec_123`,
+              decision_id: "dec_123"
+            })
+          );
+          return new Response(
+            JSON.stringify({
+              web_session_url: `${gatewayBaseUrl}/mobile/session/ticket_123`,
+              expires_at: "2026-06-25T10:05:00.000Z"
+            }),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/json"
+              }
+            }
+          );
+        }
+      }
+    );
+
+    expect(ticket).toEqual({
+      web_session_url: `${gatewayBaseUrl}/mobile/session/ticket_123`,
+      expires_at: "2026-06-25T10:05:00.000Z"
+    });
+    expect(new URL(ticket.web_session_url).origin).toBe(gatewayBaseUrl);
+  });
+
   it("rejects unsafe gateway web session ticket responses", async () => {
     const intent = {
       decision_id: "dec_123",
