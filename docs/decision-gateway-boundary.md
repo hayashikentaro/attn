@@ -104,6 +104,20 @@ These events are operational diagnostics only. They are not source-of-truth deci
 
 Logs must redact tokens, pairing codes, full credential-bearing URLs, and payload fields that look like secrets.
 
+## Gateway API Paths
+
+The concrete decision-gateway API paths for mobile integration are not confirmed in this repository yet.
+
+The current Attn gateway client keeps these paths configurable through `DecisionGatewayClientConfig.paths`. Any default path values in the client are placeholders until the gateway contract confirms the actual routes.
+
+Paths that still need confirmation:
+
+- pairing exchange
+- mobile web-session or open-session ticket creation
+- observability event ingest
+
+Do not treat placeholder paths as production gateway API contracts. Before wiring the client into mobile, WebView, Novu payload handling, or any product path, confirm these routes with decision-gateway or update this document to record the confirmed paths.
+
 ## Secret And Environment Rules
 
 Attn must not put gateway tokens, `ATTN_INGEST_TOKEN`, Novu secrets, or backend API tokens in Novu payloads or Expo public environment variables.
