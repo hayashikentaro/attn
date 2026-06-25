@@ -6,6 +6,8 @@ import {
 } from "../src/api/attnClient";
 import {
   buildGatewayPairingExchangePayload,
+  buildGatewayWebSessionTicketPayload,
+  createGatewayWebSessionTicket,
   exchangeGatewayPairingToken
 } from "../src/api/gatewayClient";
 import { normalizeBackendUrl } from "../src/lib/backend";
@@ -349,6 +351,27 @@ describe("mobile helpers", () => {
     });
   });
 
+  it("builds gateway web session ticket payloads", () => {
+    expect(
+      buildGatewayWebSessionTicketPayload({
+        mobileSessionToken: "mobile_session_secret",
+        intent: {
+          decision_id: "dec_123",
+          decision_url: "https://decision-gateway.example.com/decisions/dec_123",
+          title: "Deployment approval",
+          summary: "Production deploy is waiting for a decision.",
+          urgency: "high",
+          dedupe_key: "deploy:123",
+          occurred_at: "2026-06-25T10:00:00.000Z"
+        }
+      })
+    ).toEqual({
+      mobile_session_token: "mobile_session_secret",
+      decision_url: "https://decision-gateway.example.com/decisions/dec_123",
+      decision_id: "dec_123"
+    });
+  });
+
   it("exchanges gateway pairing tokens with a configurable path", async () => {
     const calls: Array<{
       input: RequestInfo | URL;
@@ -411,6 +434,166 @@ describe("mobile helpers", () => {
       },
       gateway_origin: "https://decision-gateway.example.com"
     });
+  });
+
+  it("creates gateway web session tickets with a configurable path", async () => {
+    const calls: Array<{
+      input: RequestInfo | URL;
+      init?: RequestInit;
+    }> = [];
+
+    const result = await createGatewayWebSessionTicket(
+      {
+        gatewayBaseUrl: "https://decision-gateway.example.com"
+      },
+      {
+        mobileSessionToken: "mobile_session_secret",
+        webSessionPath: "/custom/web-session",
+        intent: {
+          decision_id: "dec_123",
+          decision_url: "https://decision-gateway.example.com/decisions/dec_123",
+          title: "Deployment approval",
+          summary: "Production deploy is waiting for a decision.",
+          urgency: "high",
+          dedupe_key: "deploy:123",
+          occurred_at: "2026-06-25T10:00:00.000Z"
+        },
+        fetchImpl: async (input, init) => {
+          calls.push({ input, init });
+          return new Response(
+            JSON.stringify({
+              web_session_url:
+                "https://decision-gateway.example.com/mobile/session/ticket_123",
+              expires_at: "2026-06-25T10:05:00.000Z"
+            }),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/json"
+              }
+            }
+          );
+        }
+      }
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(String(calls[0]?.input)).toBe(
+      "https://decision-gateway.example.com/custom/web-session"
+    );
+    expect(calls[0]?.init?.headers).toEqual({
+      "Content-Type": "application/json"
+    });
+    expect(calls[0]?.init?.body).toBe(
+      JSON.stringify({
+        mobile_session_token: "mobile_session_secret",
+        decision_url: "https://decision-gateway.example.com/decisions/dec_123",
+        decision_id: "dec_123"
+      })
+    );
+    expect(result).toEqual({
+      web_session_url:
+        "https://decision-gateway.example.com/mobile/session/ticket_123",
+      expires_at: "2026-06-25T10:05:00.000Z"
+    });
+  });
+
+  it("rejects unsafe gateway web session ticket responses", async () => {
+    const intent = {
+      decision_id: "dec_123",
+      decision_url: "https://decision-gateway.example.com/decisions/dec_123",
+      title: "Deployment approval",
+      summary: "Production deploy is waiting for a decision.",
+      urgency: "high" as const,
+      dedupe_key: "deploy:123",
+      occurred_at: "2026-06-25T10:00:00.000Z"
+    };
+
+    await expect(
+      createGatewayWebSessionTicket(
+        {
+          gatewayBaseUrl: null
+        },
+        {
+          mobileSessionToken: "mobile_session_secret",
+          intent
+        }
+      )
+    ).rejects.toThrow("Decision Gateway URL is not configured.");
+
+    const httpFailure = createGatewayWebSessionTicket(
+      {
+        gatewayBaseUrl: "https://decision-gateway.example.com"
+      },
+      {
+        mobileSessionToken: "mobile_session_secret",
+        intent,
+        fetchImpl: async () =>
+          new Response("mobile_session_secret", {
+            status: 401,
+            statusText: "Unauthorized"
+          })
+      }
+    );
+
+    await expect(httpFailure).rejects.toThrow(
+      "Unable to create gateway web session ticket."
+    );
+    await expect(httpFailure.catch((error: unknown) => String(error))).resolves.not.toContain(
+      "mobile_session_secret"
+    );
+
+    await expect(
+      createGatewayWebSessionTicket(
+        {
+          gatewayBaseUrl: "https://decision-gateway.example.com"
+        },
+        {
+          mobileSessionToken: "mobile_session_secret",
+          intent,
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                web_session_url:
+                  "https://attacker.example.com/mobile/session/ticket_123",
+                expires_at: "2026-06-25T10:05:00.000Z"
+              }),
+              {
+                status: 200,
+                headers: {
+                  "content-type": "application/json"
+                }
+              }
+            )
+        }
+      )
+    ).rejects.toThrow("Gateway web session ticket response was invalid.");
+
+    await expect(
+      createGatewayWebSessionTicket(
+        {
+          gatewayBaseUrl: "https://decision-gateway.example.com"
+        },
+        {
+          mobileSessionToken: "mobile_session_secret",
+          intent,
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                web_session_url:
+                  "https://decision-gateway.example.com/mobile/session/ticket_123?session_token=secret",
+                expires_at: "2026-06-25T10:05:00.000Z"
+              }),
+              {
+                status: 200,
+                headers: {
+                  "content-type": "application/json"
+                }
+              }
+            )
+        }
+      )
+    ).rejects.toThrow("Gateway web session ticket response was invalid.");
   });
 
   it("returns safe gateway pairing errors without token values", async () => {
