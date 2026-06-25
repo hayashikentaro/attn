@@ -11,13 +11,24 @@ import {
   View
 } from "react-native";
 import * as Notifications from "expo-notifications";
+import { WebView } from "react-native-webview";
 import { pairDevice, registerDevice, unregisterDevice } from "./src/api/attnClient";
-import { exchangeGatewayPairingToken } from "./src/api/gatewayClient";
+import {
+  createGatewayWebSessionTicket,
+  exchangeGatewayPairingToken
+} from "./src/api/gatewayClient";
 import { getMobileConfig } from "./src/config";
 import { openAttnItemFromPayload } from "./src/openAttnItem";
 import { requestExpoPushToken } from "./src/push";
-import { savePendingGatewayDecisionIntent } from "./src/lib/gatewayPendingIntentStorage";
-import { parseGatewayNotificationPayload } from "./src/lib/gatewayPayload";
+import {
+  clearPendingGatewayDecisionIntent,
+  loadPendingGatewayDecisionIntent,
+  savePendingGatewayDecisionIntent
+} from "./src/lib/gatewayPendingIntentStorage";
+import {
+  parseGatewayNotificationPayload,
+  type GatewayNotificationPayload
+} from "./src/lib/gatewayPayload";
 import {
   loadGatewayMobileSession,
   saveGatewayMobileSession
@@ -62,7 +73,36 @@ export default function App() {
   const [gatewaySessionLabel, setGatewaySessionLabel] = useState<string | null>(null);
   const [registrationStatus, setRegistrationStatus] =
     useState<RegistrationState>("idle");
+  const [webSessionUrl, setWebSessionUrl] = useState<string | null>(null);
   const [message, setMessage] = useState("Ready for Gateway pairing.");
+
+  async function openGatewayDecisionFromIntent(
+    intent: GatewayNotificationPayload
+  ) {
+    const session = await loadGatewayMobileSession();
+    if (!session) {
+      setGatewaySessionStatus("missing");
+      setGatewaySessionLabel(null);
+      setMessage("Gateway pairing required before opening this decision.");
+      return false;
+    }
+
+    try {
+      const ticket = await createGatewayWebSessionTicket(config, {
+        mobileSessionToken: session.session_token,
+        intent
+      });
+      setGatewaySessionStatus("connected");
+      setGatewaySessionLabel(session.subject_label ?? null);
+      setWebSessionUrl(ticket.web_session_url);
+      await clearPendingGatewayDecisionIntent();
+      setMessage("Opened Gateway decision.");
+      return true;
+    } catch {
+      setMessage("Unable to open Gateway decision.");
+      return false;
+    }
+  }
 
   useEffect(() => {
     let mounted = true;
@@ -107,17 +147,7 @@ export default function App() {
             gatewayPayload.payload,
             config.gatewayBaseUrl
           );
-          const session = await loadGatewayMobileSession();
-
-          if (session) {
-            setGatewaySessionStatus("connected");
-            setGatewaySessionLabel(session.subject_label ?? null);
-            setMessage("Gateway decision is ready for WebView.");
-          } else {
-            setGatewaySessionStatus("missing");
-            setGatewaySessionLabel(null);
-            setMessage("Gateway pairing required before opening this decision.");
-          }
+          await openGatewayDecisionFromIntent(gatewayPayload.payload);
         } catch {
           setMessage("Unable to prepare Gateway decision.");
         }
@@ -173,6 +203,13 @@ export default function App() {
       setGatewaySessionStatus("connected");
       setGatewaySessionLabel(result.mobile_session.subject_label ?? null);
       setMessage("Decision Gateway session connected.");
+
+      const pendingIntent = await loadPendingGatewayDecisionIntent(
+        config.gatewayBaseUrl
+      );
+      if (pendingIntent) {
+        await openGatewayDecisionFromIntent(pendingIntent);
+      }
     } catch {
       setGatewaySessionStatus("failed");
       setMessage("Gateway pairing failed.");
@@ -288,11 +325,40 @@ export default function App() {
     void Linking.openURL(config.testItemUrl);
   }
 
+  function isGatewayNavigationAllowed(url: string) {
+    if (!config.gatewayBaseUrl) {
+      return false;
+    }
+
+    try {
+      return new URL(url).origin === new URL(config.gatewayBaseUrl).origin;
+    } catch {
+      return false;
+    }
+  }
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container}>
         <Text style={styles.title}>Attn</Text>
         <Text style={styles.subtitle}>Mobile shell for future Push E2E testing</Text>
+
+        {webSessionUrl ? (
+          <View style={styles.webViewShell}>
+            <WebView
+              onError={() => setMessage("Gateway page failed to load.")}
+              onShouldStartLoadWithRequest={(request) => {
+                const allowed = isGatewayNavigationAllowed(request.url);
+                if (!allowed) {
+                  setMessage("Blocked navigation outside Gateway.");
+                }
+                return allowed;
+              }}
+              source={{ uri: webSessionUrl }}
+              style={styles.webView}
+            />
+          </View>
+        ) : null}
 
         <View style={styles.panel}>
           <Text style={styles.label}>Backend URL</Text>
@@ -375,6 +441,11 @@ export default function App() {
             label="Open test item URL"
             onPress={openTestItem}
           />
+          <Button
+            disabled={!webSessionUrl}
+            label="Close Gateway page"
+            onPress={() => setWebSessionUrl(null)}
+          />
         </View>
 
         <Text style={styles.message}>{message}</Text>
@@ -409,6 +480,17 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     gap: 6,
     padding: 16
+  },
+  webViewShell: {
+    backgroundColor: "#ffffff",
+    borderColor: "#d8d8d3",
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 520,
+    overflow: "hidden"
+  },
+  webView: {
+    flex: 1
   },
   label: {
     color: "#6b6b68",

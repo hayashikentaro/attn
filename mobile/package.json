@@ -18,7 +18,8 @@
     "expo-notifications": "^0.32.0",
     "expo-secure-store": "^56.0.4",
     "react": "^19.1.0",
-    "react-native": "^0.81.0"
+    "react-native": "^0.81.0",
+    "react-native-webview": "^14.0.1"
   },
   "devDependencies": {
     "@types/react": "^19.1.0",
