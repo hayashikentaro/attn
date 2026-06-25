@@ -1,12 +1,16 @@
 # Attn
 
-Attn is a queue for human attention and decisions. It is not a chat app or a Slack clone: Slack can still be used as a safety bell, while Attn keeps the durable state of what needs action.
+Attn is the iOS/mobile notification entry point for a Decision Gateway-owned decision system. It is not a chat app or a Slack clone: Slack can still be used as a safety bell, while Attn focuses on receipt, diagnostics, and opening Gateway-owned decisions.
 
-The MVP focuses on notification items from deployments and agents:
+Decision Gateway is the source of truth for decisions, authentication, authorization, canonical state, business rules, callbacks, and decision execution. Attn's web queue and device APIs are legacy/MVP infrastructure for local smoke tests and diagnostics, not a second approval system.
+
+See `docs/decision-gateway-boundary.md` for the durable Gateway boundary.
+
+The legacy web MVP focuses on notification items from deployments and agents:
 
 - `/queue` shows **Needs you**, **Later**, and **Done**.
 - `/items/[id]` shows detail, raw payload JSON, and action history.
-- `/api/notifications` ingests new notification events.
+- `/api/notifications` ingests legacy diagnostic notification events.
 - State changes create event history rows.
 
 ## Local Setup
@@ -33,7 +37,7 @@ npm run dev
 
 Open `http://localhost:3999/queue`.
 
-The minimal future-Push mobile shell lives in `mobile/`. It is isolated from the web app and documented in `mobile/README.md`.
+The Gateway-oriented mobile shell lives in `mobile/`. It is isolated from the web app and documented in `mobile/README.md`.
 
 For deployed environments, run the same command from a trusted shell that has
 `DATABASE_URL` pointed at the deployed database. The migration script applies
@@ -95,10 +99,12 @@ If `ATTN_INGEST_TOKEN` is set, ingestion requires either:
 
 If `ATTN_INGEST_TOKEN` is not set, ingestion is open for local development.
 
-Do not put `ATTN_INGEST_TOKEN` in the mobile app or any `EXPO_PUBLIC_*`
-variable. Expo public variables are bundled into the client. Mobile device
-registration uses short-lived pairing codes and scoped device registration
-tokens instead.
+Do not put `ATTN_INGEST_TOKEN`, `DECISION_GATEWAY_API_TOKEN`, Gateway mobile
+session tokens, or web-session tickets in the mobile app or any `EXPO_PUBLIC_*`
+variable. Expo public variables are bundled into the client. Gateway pairing
+uses a Gateway-issued pairing token and stores the returned mobile session in
+secure local storage. Legacy Attn device registration uses short-lived pairing
+codes and scoped registration tokens only for diagnostics.
 
 Set `NOVU_DRY_RUN=true` when you want deterministic delivery bookkeeping
 without calling Novu, even if Novu credentials are present.
@@ -234,8 +240,8 @@ curl http://localhost:3999/api/diagnostics \
   -H "Authorization: Bearer $ATTN_INGEST_TOKEN"
 ```
 
-Create a short-lived device pairing code. This is an admin/server action and
-requires `ATTN_INGEST_TOKEN`:
+Create a short-lived legacy diagnostic device pairing code. This is an
+admin/server action and requires `ATTN_INGEST_TOKEN`:
 
 ```bash
 curl -X POST http://localhost:3999/api/devices/pairing-codes \
@@ -249,7 +255,7 @@ curl -X POST http://localhost:3999/api/devices/pairing-codes \
   }'
 ```
 
-Exchange the pairing code from the mobile app or a test client:
+Exchange the legacy diagnostic pairing code from the mobile app or a test client:
 
 ```bash
 curl -X POST http://localhost:3999/api/devices/pair \
@@ -263,7 +269,7 @@ curl -X POST http://localhost:3999/api/devices/pair \
   }'
 ```
 
-Register a future Push device using the scoped registration token returned by
+Register a diagnostic Push device using the scoped registration token returned by
 the pairing exchange:
 
 ```bash
@@ -299,7 +305,7 @@ clients should not use that path.
 
 - `GET /api/health` returns app status and database connectivity without exposing secrets.
 - `GET /api/diagnostics` returns protected, safe deployment diagnostics without exposing secrets.
-- `POST /api/notifications` creates a notification and records `created`.
+- `POST /api/notifications` creates a legacy diagnostic notification and records `created`.
 - `GET /api/notifications?bucket=needs_you` lists notifications. Buckets: `needs_you`, `later`, `done`, `all`.
 - `GET /api/notifications/[id]` returns one notification with event history.
 - `POST /api/notifications/[id]/acknowledge` marks acknowledged.
@@ -307,10 +313,10 @@ clients should not use that path.
 - `POST /api/notifications/[id]/resolve` marks done.
 - `POST /api/notifications/[id]/reopen` moves the item back to new.
 - `POST /api/notifications/[id]/decision` records `decision:<value>` for checkpoint-style items.
-- `POST /api/devices/pairing-codes` creates a short-lived pairing code. It is protected by `ATTN_INGEST_TOKEN` and returns the raw code only once.
-- `POST /api/devices/pair` exchanges a pairing code for a scoped device registration token.
-- `POST /api/devices/register` creates or updates a future Push device record using the scoped registration token. Raw device tokens are accepted by the API but are not returned.
-- `POST /api/devices/unregister` revokes a device by id or by provider plus device token using the scoped registration token.
+- `POST /api/devices/pairing-codes` creates a short-lived legacy diagnostic pairing code. It is protected by `ATTN_INGEST_TOKEN` and returns the raw code only once.
+- `POST /api/devices/pair` exchanges a legacy diagnostic pairing code for a scoped device registration token.
+- `POST /api/devices/register` creates or updates a diagnostic Push device record using the scoped registration token. Raw device tokens are accepted by the API but are not returned.
+- `POST /api/devices/unregister` revokes a diagnostic device by id or by provider plus device token using the scoped registration token.
 
 Allowed decisions are `approve`, `approve_with_condition`, `reject`, `ask_follow_up`, and `suspend`.
 
@@ -322,13 +328,13 @@ Attn stores internal statuses, but the UI groups them into three human buckets:
 - **Later**: `snoozed` with `snoozed_until` in the future.
 - **Done**: `resolved`.
 
-The database is the source of truth. Every meaningful state transition writes a row to `notification_events`.
+For the legacy Attn queue only, the database is the source of truth. Every meaningful legacy queue state transition writes a row to `notification_events`. Gateway-owned decisions, permissions, callbacks, and final execution state live in Decision Gateway.
 
 ## Delivery State
 
 Attn records delivery bookkeeping in `notification_deliveries`.
 
-Every notification gets an `in_app` / `none` delivery row because the database-backed queue is the source of truth.
+Every legacy notification gets an `in_app` / `none` delivery row because the database-backed queue owns its diagnostic state.
 
 Routing is code-defined for now:
 
@@ -341,29 +347,30 @@ When a high/critical/checkpoint route wants Slack or Novu but the provider is no
 
 ## Subscribers And Devices
 
-Attn now has a minimal subscriber and device-token foundation for the future mobile app.
+Attn has a minimal subscriber and device-token foundation for legacy diagnostic mobile registration. Gateway pairing and mobile sessions are separate and owned by Decision Gateway.
 
 If an incoming device registration does not specify `subscriber_id`, Attn uses a default subscriber. The default external id is `ATTN_DEFAULT_SUBSCRIBER_EXTERNAL_ID` or `attn-operator`; the default Novu subscriber id is `NOVU_SUBSCRIBER_ID` or the same external id.
 
-Mobile device registration starts with a pairing code. The backend stores only `code_hash`, then exchanges a valid, unused, unexpired code for a short-lived scoped device registration token. That token is only accepted by device register/unregister endpoints; it is not an ingest token and does not allow admin actions.
+Legacy diagnostic device registration starts with a pairing code. The backend stores only `code_hash`, then exchanges a valid, unused, unexpired code for a short-lived scoped device registration token. That token is only accepted by device register/unregister endpoints; it is not an ingest token, Gateway credential, or admin token.
 
 Device registration stores `device_token_hash` for identification and debugging. Raw device tokens are not returned in API responses and are not stored in this pass. Unregistering a device sets `revoked_at` instead of hard-deleting it, so revoked devices can be excluded from future push delivery.
 
-Mobile Push is intentionally not implemented yet. This pass stops at backend foundations because real Push still requires provider credentials, a mobile shell, and device-token lifecycle verification.
+Live Mobile Push is not verified yet. The repository now has Gateway-oriented mobile foundations, but real Push still requires provider credentials, a physical device, and live Novu/APNs/FCM verification.
 
-The `mobile/` Expo shell now covers the mobile-side foundation: permission request, Expo push token acquisition path, device registration/unregistration calls, queue/test-item opening, and future tap-to-open payload handling. It does not prove real Push delivery.
+The `mobile/` Expo shell now covers Gateway pairing, secure Gateway mobile session storage, safe Gateway payload parsing, pending decision intent storage, Gateway web-session ticket requests, and an in-app WebView constrained to the Gateway origin. It keeps legacy Attn device registration/unregistration calls for diagnostics. It does not prove real Push delivery.
 
 Next steps for real Push:
 
-1. Configure Novu for the real workflow and subscriber credentials.
-2. Configure `EXPO_PUBLIC_ATTN_BACKEND_URL` in `mobile/`.
-3. Run the mobile shell on a real device.
-4. Create a pairing code from the backend.
-5. Pair the mobile app and receive a scoped registration token.
+1. Confirm the Gateway mobile API paths for pairing, web-session ticket creation, and observability.
+2. Configure Novu from Gateway so the Push payload contains only the safe Gateway routing contract.
+3. Configure `EXPO_PUBLIC_DECISION_GATEWAY_BASE_URL` in `mobile/`.
+4. Run the mobile shell on a real device.
+5. Pair the mobile app with a Gateway pairing token.
 6. Get an Expo, FCM, or APNs device token.
-7. Register the token through `/api/devices/register`.
-8. Trigger a notification that routes toward Novu/Push.
-9. Tap the push notification to open the Attn item.
+7. Use legacy Attn device registration only if diagnostic push-token registration is still needed.
+8. Trigger a Gateway-owned decision notification through Novu.
+9. Tap the push notification and open the Gateway decision page in Attn's WebView.
+10. Verify decision execution remains Gateway-owned.
 
 ## Slack Fan-Out
 
@@ -451,7 +458,7 @@ Manual flow:
 
 - No chat, channels, comments, reactions, or team collaboration.
 - No multi-tenant billing or complex RBAC.
-- No push notification setup.
+- No verified live Push run yet.
 - No full Novu workflow builder.
-- Decision buttons record events only; they do not call back to an agent yet.
+- Legacy Attn decision buttons record events only; Gateway-owned decisions execute in Decision Gateway.
 - Pagination is intentionally minimal; list endpoints cap `limit` at 250.
