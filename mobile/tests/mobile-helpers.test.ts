@@ -6,8 +6,34 @@ import {
 } from "../src/api/attnClient";
 import { normalizeBackendUrl } from "../src/lib/backend";
 import { resolveItemUrlFromPayload } from "../src/lib/deepLinks";
+import {
+  clearGatewayMobileSession,
+  gatewayMobileSessionStorageKey,
+  loadGatewayMobileSession,
+  saveGatewayMobileSession,
+  type GatewaySessionStorage
+} from "../src/lib/gatewaySessionStorage";
 import { getMobilePublicConfig } from "../src/lib/publicEnv";
 import { redactToken, tokenHashPreview } from "../src/lib/tokens";
+
+function createMemoryGatewaySessionStorage(): GatewaySessionStorage & {
+  values: Map<string, string>;
+} {
+  const values = new Map<string, string>();
+
+  return {
+    values,
+    async getItemAsync(key: string) {
+      return values.get(key) ?? null;
+    },
+    async setItemAsync(key: string, value: string) {
+      values.set(key, value);
+    },
+    async deleteItemAsync(key: string) {
+      values.delete(key);
+    }
+  };
+}
 
 describe("mobile helpers", () => {
   it("normalizes backend URLs", () => {
@@ -116,5 +142,73 @@ describe("mobile helpers", () => {
       testItemUrl: "https://attn.example.com/items/test",
       expoProjectId: "expo-project"
     });
+  });
+
+  it("saves, loads, and clears gateway mobile sessions through storage", async () => {
+    const storage = createMemoryGatewaySessionStorage();
+
+    await saveGatewayMobileSession(
+      {
+        session_token: "mobile_session_secret",
+        refresh_token: "refresh_secret",
+        expires_at: "2026-07-25T10:00:00.000Z",
+        gateway_origin: "https://decision-gateway.example.com",
+        subject_label: "Mobile user"
+      },
+      storage
+    );
+
+    expect(storage.values.has(gatewayMobileSessionStorageKey)).toBe(true);
+    await expect(loadGatewayMobileSession(storage)).resolves.toEqual({
+      session_token: "mobile_session_secret",
+      refresh_token: "refresh_secret",
+      expires_at: "2026-07-25T10:00:00.000Z",
+      gateway_origin: "https://decision-gateway.example.com",
+      subject_label: "Mobile user"
+    });
+
+    await clearGatewayMobileSession(storage);
+
+    expect(storage.values.has(gatewayMobileSessionStorageKey)).toBe(false);
+    await expect(loadGatewayMobileSession(storage)).resolves.toBeNull();
+  });
+
+  it("loads null for missing, malformed, or tokenless gateway sessions", async () => {
+    const storage = createMemoryGatewaySessionStorage();
+
+    await expect(loadGatewayMobileSession(storage)).resolves.toBeNull();
+
+    storage.values.set(gatewayMobileSessionStorageKey, "{");
+    await expect(loadGatewayMobileSession(storage)).resolves.toBeNull();
+
+    storage.values.set(
+      gatewayMobileSessionStorageKey,
+      JSON.stringify({
+        refresh_token: "refresh_without_session"
+      })
+    );
+    await expect(loadGatewayMobileSession(storage)).resolves.toBeNull();
+  });
+
+  it("does not leak gateway token values in invalid session errors", async () => {
+    const storage = createMemoryGatewaySessionStorage();
+
+    await expect(
+      saveGatewayMobileSession(
+        {
+          session_token: ""
+        },
+        storage
+      )
+    ).rejects.toThrow("Invalid gateway mobile session");
+
+    await expect(
+      saveGatewayMobileSession(
+        {
+          session_token: "mobile_session_secret"
+        },
+        storage
+      )
+    ).resolves.toBeUndefined();
   });
 });
