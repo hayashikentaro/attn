@@ -91,6 +91,24 @@ tokens instead.
 Set `NOVU_DRY_RUN=true` when you want deterministic delivery bookkeeping
 without calling Novu, even if Novu credentials are present.
 
+Check deployment-readiness env grouping without printing secret values:
+
+```bash
+npm run check:env
+```
+
+For a backend deploy guard from a shell that has the deploy env loaded:
+
+```bash
+npm run check:env -- --target=web --strict
+```
+
+For mobile public config:
+
+```bash
+npm run check:env -- --target=mobile --strict
+```
+
 ## Create Demo Data
 
 After the migration is applied:
@@ -380,6 +398,12 @@ The script checks:
 Use fake tokens only, such as `ExponentPushToken[fake-smoke-token]`. The smoke
 script does not send real Push and does not require Novu, Expo, APNs, or FCM.
 
+Print the first-deploy sequence and a safe env readiness summary:
+
+```bash
+npm run deploy:checklist
+```
+
 For the first live Push verification runbook, see `docs/push-e2e.md`.
 
 ## Verification
@@ -397,9 +421,8 @@ git diff --check
 Mobile helper checks:
 
 ```bash
-cd mobile
-npm run typecheck
-npm run test
+npm --prefix mobile run typecheck
+npm --prefix mobile run test
 ```
 
 Manual flow:

@@ -9,6 +9,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
+    "check:env": "tsx scripts/check-env.ts",
+    "deploy:checklist": "tsx scripts/deploy-checklist.ts",
     "migrate": "sh -c 'for file in supabase/migrations/*.sql; do psql \"$DATABASE_URL\" -f \"$file\"; done'",
     "seed": "tsx scripts/seed-notifications.ts",
     "smoke:e2e": "tsx scripts/smoke-e2e.ts"

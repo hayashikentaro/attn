@@ -3,9 +3,19 @@ export const fakeExpoToken = "ExponentPushToken[fake-smoke-token]";
 export function requireSmokeConfig(env = process.env) {
   const baseUrl = env.ATTN_BASE_URL;
   const ingestToken = env.ATTN_INGEST_TOKEN;
+  const missing = [
+    ["ATTN_BASE_URL", baseUrl],
+    ["ATTN_INGEST_TOKEN", ingestToken]
+  ]
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
 
   if (!baseUrl || !ingestToken) {
-    throw new Error("ATTN_BASE_URL and ATTN_INGEST_TOKEN are required.");
+    throw new Error(
+      `Missing smoke:e2e environment: ${missing.join(
+        ", "
+      )}. Set ATTN_BASE_URL to the target backend and ATTN_INGEST_TOKEN to the server ingest/admin token.`
+    );
   }
 
   return {
@@ -74,4 +84,17 @@ export function redactSmokeValue(value: string) {
   }
 
   return `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
+
+export function redactSmokeText(text: string, sensitiveValues: string[] = []) {
+  let redacted = text;
+
+  for (const value of sensitiveValues.filter(Boolean)) {
+    redacted = redacted.split(value).join("[redacted]");
+  }
+
+  return redacted.replace(
+    /(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi,
+    "$1[redacted]"
+  );
 }

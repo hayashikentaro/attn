@@ -6,6 +6,7 @@ import {
 } from "../src/api/attnClient";
 import { normalizeBackendUrl } from "../src/lib/backend";
 import { resolveItemUrlFromPayload } from "../src/lib/deepLinks";
+import { getMobilePublicConfig } from "../src/lib/publicEnv";
 import { redactToken, tokenHashPreview } from "../src/lib/tokens";
 
 describe("mobile helpers", () => {
@@ -92,6 +93,28 @@ describe("mobile helpers", () => {
     expect(buildUnregisterDevicePayload("ExponentPushToken[secret]")).toEqual({
       provider: "expo",
       device_token: "ExponentPushToken[secret]"
+    });
+  });
+
+  it("builds public mobile config without reading the server ingest token", () => {
+    const env = {
+      EXPO_PUBLIC_ATTN_BACKEND_URL: "https://attn.example.com",
+      EXPO_PUBLIC_ATTN_TEST_ITEM_URL: "https://attn.example.com/items/test",
+      EXPO_PUBLIC_EXPO_PROJECT_ID: "expo-project",
+      ATTN_INGEST_TOKEN: "server-secret"
+    };
+
+    expect(
+      getMobilePublicConfig(
+        env,
+        {
+          attnBackendUrl: "https://fallback.example.com"
+        }
+      )
+    ).toEqual({
+      backendUrl: "https://attn.example.com",
+      testItemUrl: "https://attn.example.com/items/test",
+      expoProjectId: "expo-project"
     });
   });
 });

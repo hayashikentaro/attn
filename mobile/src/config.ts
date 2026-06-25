@@ -1,5 +1,5 @@
 import Constants from "expo-constants";
-import { normalizeBackendUrl } from "./lib/backend";
+import { getMobilePublicConfig } from "./lib/publicEnv";
 
 interface ExpoExtra {
   attnBackendUrl?: string;
@@ -13,20 +13,8 @@ function getExtra() {
 
 export function getMobileConfig() {
   const extra = getExtra();
-  const backendUrl = normalizeBackendUrl(
-    process.env.EXPO_PUBLIC_ATTN_BACKEND_URL || extra.attnBackendUrl
-  );
-
-  return {
-    backendUrl,
-    testItemUrl:
-      process.env.EXPO_PUBLIC_ATTN_TEST_ITEM_URL ||
-      extra.attnTestItemUrl ||
-      null,
-    expoProjectId:
-      process.env.EXPO_PUBLIC_EXPO_PROJECT_ID ||
-      extra.expoProjectId ||
-      Constants.expoConfig?.extra?.eas?.projectId ||
-      null
-  };
+  return getMobilePublicConfig(process.env, {
+    ...extra,
+    easProjectId: Constants.expoConfig?.extra?.eas?.projectId
+  });
 }

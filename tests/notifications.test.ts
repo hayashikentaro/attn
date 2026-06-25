@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
 import { describe, expect, it } from "vitest";
+import { GET as getDiagnosticsRoute } from "@/app/api/diagnostics/route";
 import { getHealthPayload } from "@/app/api/health/route";
 import { POST as postNotification } from "@/app/api/notifications/route";
 import { isIngestAuthorized } from "@/lib/auth";
 import { getDiagnosticsPayload } from "@/lib/diagnostics";
+import { formatEnvReport, getEnvReport } from "@/lib/env-validation";
 import {
   createDevicePairingCode,
   exchangeDevicePairingCode,
@@ -67,7 +69,9 @@ import {
   buildRegisterDevicePayload as buildSmokeRegisterDevicePayload,
   buildSmokeNotificationPayload,
   buildUnregisterDevicePayload,
-  fakeExpoToken
+  fakeExpoToken,
+  redactSmokeText,
+  requireSmokeConfig
 } from "@/scripts/smoke-helpers";
 
 class MemoryNotificationRepository implements NotificationRepository {
@@ -1356,6 +1360,83 @@ describe("notifications", () => {
     expect(JSON.stringify(payload)).not.toContain("server-secret");
     expect(JSON.stringify(payload)).not.toContain("novu-secret");
     expect(JSON.stringify(payload)).not.toContain("secret-pass");
+    expect(JSON.stringify(payload)).not.toContain(fakeExpoToken);
+  });
+
+  it("keeps diagnostics protected by the admin token", async () => {
+    const originalToken = process.env.ATTN_INGEST_TOKEN;
+    process.env.ATTN_INGEST_TOKEN = "diagnostics-secret";
+
+    try {
+      const response = await getDiagnosticsRoute(
+        new NextRequest("http://localhost:3999/api/diagnostics")
+      );
+
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({
+        error: "Unauthorized"
+      });
+    } finally {
+      if (originalToken === undefined) {
+        delete process.env.ATTN_INGEST_TOKEN;
+      } else {
+        process.env.ATTN_INGEST_TOKEN = originalToken;
+      }
+    }
+  });
+
+  it("reports env readiness without exposing configured values", () => {
+    const report = getEnvReport(
+      {
+        NODE_ENV: "test",
+        DATABASE_URL: "postgres://secret-user:secret-pass@example.test/db",
+        ATTN_INGEST_TOKEN: "server-secret",
+        APP_BASE_URL: "https://attn.example.com",
+        NEXT_PUBLIC_APP_BASE_URL: "https://attn.example.com",
+        SLACK_WEBHOOK_URL: "https://hooks.slack.example/secret",
+        NOVU_SECRET_KEY: "novu-secret",
+        NOVU_WORKFLOW_ID: "workflow-id",
+        NOVU_DRY_RUN: "true",
+        EXPO_PUBLIC_ATTN_BACKEND_URL: "https://attn.example.com"
+      } as NodeJS.ProcessEnv,
+      "all"
+    );
+    const output = formatEnvReport(report);
+
+    expect(report.ok).toBe(true);
+    expect(output).toContain("Required web runtime");
+    expect(output).toContain("server-only secret");
+    expect(output).toContain("Mobile public");
+    expect(output).not.toContain("server-secret");
+    expect(output).not.toContain("novu-secret");
+    expect(output).not.toContain("secret-pass");
+    expect(output).not.toContain("hooks.slack.example");
+  });
+
+  it("identifies missing required web runtime env separately from optional integrations", () => {
+    const report = getEnvReport(
+      {
+        NODE_ENV: "test",
+        NOVU_SECRET_KEY: "optional-secret"
+      } as NodeJS.ProcessEnv,
+      "web"
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.missingRequired).toEqual([
+      "DATABASE_URL",
+      "ATTN_INGEST_TOKEN",
+      "APP_BASE_URL",
+      "NEXT_PUBLIC_APP_BASE_URL"
+    ]);
+    expect(
+      report.checks.find((check) => check.name === "NOVU_SECRET_KEY")
+    ).toMatchObject({
+      group: "optional_integrations",
+      required: false,
+      present: true,
+      exposure: "server-only secret"
+    });
   });
 
   it("supports deterministic Novu dry-run responses", async () => {
@@ -1459,5 +1540,17 @@ describe("notifications", () => {
       provider: "expo",
       device_token: fakeExpoToken
     });
+  });
+
+  it("redacts smoke helper output and reports missing config clearly", () => {
+    expect(
+      redactSmokeText("Authorization: Bearer secret-token", ["secret-token"])
+    ).toBe("Authorization: Bearer [redacted]");
+    expect(redactSmokeText("pairing ABCD-EFGH", ["ABCD-EFGH"])).toBe(
+      "pairing [redacted]"
+    );
+    expect(() => requireSmokeConfig({} as NodeJS.ProcessEnv)).toThrow(
+      /Missing smoke:e2e environment: ATTN_BASE_URL, ATTN_INGEST_TOKEN/
+    );
   });
 });

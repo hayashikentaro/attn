@@ -5,6 +5,7 @@ import {
   buildSmokeNotificationPayload,
   buildUnregisterDevicePayload,
   requireSmokeConfig,
+  redactSmokeText,
   redactSmokeValue
 } from "./smoke-helpers";
 
@@ -15,7 +16,8 @@ interface JsonResponse {
 
 async function requestJson(
   url: string,
-  init: RequestInit = {}
+  init: RequestInit = {},
+  sensitiveValues: string[] = []
 ): Promise<JsonResponse> {
   const response = await fetch(url, init);
   let body: unknown = null;
@@ -27,9 +29,8 @@ async function requestJson(
   }
 
   if (!response.ok) {
-    throw new Error(
-      `Request failed ${response.status} ${url}: ${JSON.stringify(body)}`
-    );
+    const safeBody = redactSmokeText(JSON.stringify(body), sensitiveValues);
+    throw new Error(`Request failed ${response.status} ${url}: ${safeBody}`);
   }
 
   return {
@@ -59,6 +60,7 @@ function readPath<T>(body: unknown, path: string[]): T {
 
 async function main() {
   const { baseUrl, ingestToken } = requireSmokeConfig();
+  const sensitiveValues = [ingestToken];
   const runId = `smoke-${Date.now()}`;
 
   console.log(`Smoke target: ${baseUrl}`);
@@ -66,19 +68,27 @@ async function main() {
   const health = await requestJson(`${baseUrl}/api/health`);
   console.log(`health: ${health.status}`);
 
-  const create = await requestJson(`${baseUrl}/api/notifications`, {
-    method: "POST",
-    headers: authHeaders(ingestToken),
-    body: JSON.stringify(buildSmokeNotificationPayload(runId))
-  });
+  const create = await requestJson(
+    `${baseUrl}/api/notifications`,
+    {
+      method: "POST",
+      headers: authHeaders(ingestToken),
+      body: JSON.stringify(buildSmokeNotificationPayload(runId))
+    },
+    sensitiveValues
+  );
   const notificationId = readPath<string>(create.body, ["notification", "id"]);
   console.log(`ingest: ${create.status} item=${notificationId}`);
 
-  const duplicate = await requestJson(`${baseUrl}/api/notifications`, {
-    method: "POST",
-    headers: authHeaders(ingestToken),
-    body: JSON.stringify(buildSmokeNotificationPayload(runId))
-  });
+  const duplicate = await requestJson(
+    `${baseUrl}/api/notifications`,
+    {
+      method: "POST",
+      headers: authHeaders(ingestToken),
+      body: JSON.stringify(buildSmokeNotificationPayload(runId))
+    },
+    sensitiveValues
+  );
   const duplicated = readPath<boolean>(duplicate.body, ["duplicated"]);
   if (!duplicated) {
     throw new Error("Expected duplicate ingest to return duplicated=true.");
@@ -91,42 +101,66 @@ async function main() {
       method: "POST",
       headers: authHeaders(ingestToken),
       body: JSON.stringify(buildPairingCodePayload())
-    }
+    },
+    sensitiveValues
   );
-  const pairingCode = readPath<string>(pairingCodeResponse.body, ["pairing_code"]);
+  const pairingCode = readPath<string>(pairingCodeResponse.body, [
+    "pairing_code"
+  ]);
+  sensitiveValues.push(pairingCode);
   console.log(`pairing code: ${redactSmokeValue(pairingCode)}`);
 
-  const pair = await requestJson(`${baseUrl}/api/devices/pair`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
+  const pair = await requestJson(
+    `${baseUrl}/api/devices/pair`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(buildPairPayload(pairingCode))
     },
-    body: JSON.stringify(buildPairPayload(pairingCode))
-  });
+    sensitiveValues
+  );
   const registrationToken = readPath<string>(pair.body, ["registration_token"]);
+  sensitiveValues.push(registrationToken);
   console.log(`device token scope: ${redactSmokeValue(registrationToken)}`);
 
-  const register = await requestJson(`${baseUrl}/api/devices/register`, {
-    method: "POST",
-    headers: authHeaders(registrationToken),
-    body: JSON.stringify(buildRegisterDevicePayload())
-  });
-  const tokenHash = readPath<string>(register.body, ["device", "device_token_hash"]);
+  const register = await requestJson(
+    `${baseUrl}/api/devices/register`,
+    {
+      method: "POST",
+      headers: authHeaders(registrationToken),
+      body: JSON.stringify(buildRegisterDevicePayload())
+    },
+    sensitiveValues
+  );
+  const tokenHash = readPath<string>(register.body, [
+    "device",
+    "device_token_hash"
+  ]);
   console.log(`device registered hash=${redactSmokeValue(tokenHash)}`);
 
-  const unregister = await requestJson(`${baseUrl}/api/devices/unregister`, {
-    method: "POST",
-    headers: authHeaders(registrationToken),
-    body: JSON.stringify(buildUnregisterDevicePayload())
-  });
+  const unregister = await requestJson(
+    `${baseUrl}/api/devices/unregister`,
+    {
+      method: "POST",
+      headers: authHeaders(registrationToken),
+      body: JSON.stringify(buildUnregisterDevicePayload())
+    },
+    sensitiveValues
+  );
   console.log(`device unregister: ${unregister.status}`);
 
   const highId = `${runId}-high`;
-  const high = await requestJson(`${baseUrl}/api/notifications`, {
-    method: "POST",
-    headers: authHeaders(ingestToken),
-    body: JSON.stringify(buildSmokeNotificationPayload(highId, "high"))
-  });
+  const high = await requestJson(
+    `${baseUrl}/api/notifications`,
+    {
+      method: "POST",
+      headers: authHeaders(ingestToken),
+      body: JSON.stringify(buildSmokeNotificationPayload(highId, "high"))
+    },
+    sensitiveValues
+  );
   const highNotificationId = readPath<string>(high.body, ["notification", "id"]);
   const detail = await requestJson(
     `${baseUrl}/api/notifications/${highNotificationId}`
@@ -140,15 +174,21 @@ async function main() {
   }
   console.log(`deliveries: ${deliveries.length}`);
 
-  const diagnostics = await requestJson(`${baseUrl}/api/diagnostics`, {
-    headers: authHeaders(ingestToken)
-  });
+  const diagnostics = await requestJson(
+    `${baseUrl}/api/diagnostics`,
+    {
+      headers: authHeaders(ingestToken)
+    },
+    sensitiveValues
+  );
   console.log(`diagnostics: ${diagnostics.status}`);
 
   console.log("smoke:e2e passed");
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(redactSmokeText(message));
+  console.error("smoke:e2e failed");
   process.exitCode = 1;
 });

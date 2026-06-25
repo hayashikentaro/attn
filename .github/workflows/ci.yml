@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install mobile dependencies when locked
+        run: |
+          if [ -f mobile/package-lock.json ] || [ -f mobile/npm-shrinkwrap.json ]; then
+            npm --prefix mobile ci
+          else
+            echo "No mobile npm lockfile found; using root-installed tooling for mobile helper checks."
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: Mobile typecheck
+        run: npm --prefix mobile run typecheck
+
+      - name: Mobile tests
+        run: npm --prefix mobile run test
+
+      - name: Whitespace check
+        run: git diff --check

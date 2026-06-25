@@ -54,15 +54,17 @@ For first-device setup:
 1. Start or deploy the Attn backend.
 2. Apply backend migrations with `npm run migrate`.
 3. Set `EXPO_PUBLIC_ATTN_BACKEND_URL` to a URL the device can reach.
-4. Run `npm run start`.
-5. Open the Expo app on a real device.
-6. Create a pairing code from a trusted backend/admin shell.
-7. Enter the pairing code in the app and tap **Pair device**.
-8. Tap **Request notification permission**.
-9. Tap **Register device**.
-10. Confirm the device count through `/api/diagnostics`.
-11. Trigger a high-priority notification.
-12. Later, after Novu and provider credentials exist, verify real Push receipt.
+4. From the repository root, run `npm run check:env -- --target=mobile --strict` in a shell where `EXPO_PUBLIC_ATTN_BACKEND_URL` is exported.
+5. Run `npm run start`.
+6. Open the Expo app on a real device.
+7. Create a pairing code from a trusted backend/admin shell.
+8. Enter the pairing code in the app and tap **Pair device**.
+9. Tap **Request notification permission**.
+10. Tap **Register device**.
+11. Confirm the device count through `/api/diagnostics`.
+12. Configure Novu and Expo/APNs/FCM credentials.
+13. Trigger a high-priority notification.
+14. Verify real Push receipt only after live credentials and a physical device are available.
 
 ## Pairing And Device Registration
 

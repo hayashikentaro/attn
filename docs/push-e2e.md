@@ -19,14 +19,7 @@ server-only secrets in Expo public environment variables.
 
 ## Backend Setup
 
-1. Deploy the backend.
-2. Run migrations from a trusted shell:
-
-   ```bash
-   DATABASE_URL="$DEPLOYED_DATABASE_URL" npm run migrate
-   ```
-
-3. Configure required backend env vars:
+1. Configure required backend env vars:
 
    ```env
    DATABASE_URL=
@@ -35,7 +28,7 @@ server-only secrets in Expo public environment variables.
    NEXT_PUBLIC_APP_BASE_URL=
    ```
 
-4. Configure optional integration env vars when ready:
+2. Configure optional integration env vars when ready:
 
    ```env
    SLACK_WEBHOOK_URL=
@@ -45,17 +38,23 @@ server-only secrets in Expo public environment variables.
    NOVU_DRY_RUN=
    ```
 
-5. Verify health:
+3. From a trusted shell with the deploy env loaded, run the readiness guard:
+
+   ```bash
+   npm run check:env -- --target=web --strict
+   ```
+
+4. Deploy the backend.
+5. Run migrations from a trusted shell:
+
+   ```bash
+   DATABASE_URL="$DEPLOYED_DATABASE_URL" npm run migrate
+   ```
+
+6. Verify health:
 
    ```bash
    curl "$ATTN_BASE_URL/api/health"
-   ```
-
-6. Verify protected diagnostics:
-
-   ```bash
-   curl "$ATTN_BASE_URL/api/diagnostics" \
-     -H "Authorization: Bearer $ATTN_INGEST_TOKEN"
    ```
 
 7. Run smoke tests without real Push:
@@ -64,6 +63,13 @@ server-only secrets in Expo public environment variables.
    ATTN_BASE_URL="$ATTN_BASE_URL" \
    ATTN_INGEST_TOKEN="$ATTN_INGEST_TOKEN" \
    npm run smoke:e2e
+   ```
+
+8. Verify protected diagnostics:
+
+   ```bash
+   curl "$ATTN_BASE_URL/api/diagnostics" \
+     -H "Authorization: Bearer $ATTN_INGEST_TOKEN"
    ```
 
 ## Mobile Setup
@@ -81,6 +87,13 @@ server-only secrets in Expo public environment variables.
    EXPO_PUBLIC_ATTN_BACKEND_URL=https://your-attn.example.com
    EXPO_PUBLIC_ATTN_TEST_ITEM_URL=
    EXPO_PUBLIC_EXPO_PROJECT_ID=
+   ```
+
+   Check the mobile public env from a shell where the `EXPO_PUBLIC_*` values
+   are exported, without exposing values:
+
+   ```bash
+   npm run check:env -- --target=mobile --strict
    ```
 
 3. Start Expo:
@@ -106,7 +119,7 @@ server-only secrets in Expo public environment variables.
 2. Enter the returned `pairing_code` in the mobile app.
 3. Tap **Pair device**.
 4. Tap **Register device**.
-5. Confirm an active device exists:
+5. Confirm diagnostics show safe statuses and an active device count:
 
    ```bash
    curl "$ATTN_BASE_URL/api/diagnostics" \
@@ -115,7 +128,7 @@ server-only secrets in Expo public environment variables.
 
 ## Trigger Live Push
 
-1. Configure Novu provider and workflow.
+1. Configure Novu provider and workflow plus Expo/APNs/FCM credentials.
 2. Ensure `NOVU_DRY_RUN` is unset or not `true`.
 3. Trigger a high-priority decision item:
 
