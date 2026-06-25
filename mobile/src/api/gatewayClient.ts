@@ -31,8 +31,41 @@ export interface GatewayWebSessionTicketResponse {
   expires_at: string;
 }
 
+export type GatewayObservabilityEventName =
+  | "notification_received"
+  | "notification_opened"
+  | "webview_open_failed"
+  | "session_refresh_failed"
+  | "token_missing"
+  | "pairing_completed";
+
+export interface GatewayObservabilityEvent {
+  event: GatewayObservabilityEventName;
+  occurred_at: string;
+  decision_id?: string;
+  task_id?: string;
+  dedupe_key?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface GatewayObservabilityEventOptions {
+  event: GatewayObservabilityEvent;
+  observabilityPath?: string;
+  fetchImpl?: typeof fetch;
+}
+
 const defaultGatewayPairingExchangePath = "/api/mobile/pairing/exchange";
 const defaultGatewayWebSessionPath = "/api/mobile/web-sessions";
+const defaultGatewayObservabilityPath = "/api/mobile/observability";
+
+const gatewayObservabilityEventValues = new Set([
+  "notification_received",
+  "notification_opened",
+  "webview_open_failed",
+  "session_refresh_failed",
+  "token_missing",
+  "pairing_completed"
+]);
 
 const secretLikeKeyPattern =
   /(^|[_-])(access[_-]?token|api[_-]?key|auth|authorization|bearer|credential|password|refresh[_-]?token|secret|session[_-]?token|token)([_-]|$)/i;
@@ -77,6 +110,19 @@ export function buildGatewayWebSessionTicketPayload(
   };
 }
 
+export function buildGatewayObservabilityEventPayload(
+  options: GatewayObservabilityEventOptions
+) {
+  return {
+    event: options.event.event,
+    occurred_at: options.event.occurred_at,
+    ...(options.event.decision_id ? { decision_id: options.event.decision_id } : {}),
+    ...(options.event.task_id ? { task_id: options.event.task_id } : {}),
+    ...(options.event.dedupe_key ? { dedupe_key: options.event.dedupe_key } : {}),
+    metadata: options.event.metadata ?? {}
+  };
+}
+
 export async function exchangeGatewayPairingToken(
   config: GatewayMobileConfig,
   options: GatewayPairingExchangeOptions
@@ -111,6 +157,42 @@ export async function exchangeGatewayPairingToken(
   }
 
   return parsed;
+}
+
+export async function postGatewayObservabilityEvent(
+  config: GatewayMobileConfig,
+  options: GatewayObservabilityEventOptions
+): Promise<{ status: number }> {
+  if (!config.gatewayBaseUrl) {
+    throw new Error("Decision Gateway URL is not configured.");
+  }
+
+  if (!isValidGatewayObservabilityEvent(options.event)) {
+    throw new Error("Gateway observability event was invalid.");
+  }
+
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const response = await fetchImpl(
+    joinBackendPath(
+      config.gatewayBaseUrl,
+      options.observabilityPath ?? defaultGatewayObservabilityPath
+    ),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(buildGatewayObservabilityEventPayload(options))
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error("Unable to post gateway observability event.");
+  }
+
+  return {
+    status: response.status
+  };
 }
 
 export async function createGatewayWebSessionTicket(
@@ -203,6 +285,17 @@ function normalizeGatewayPairingExchangeResponse(
   };
 }
 
+function isValidGatewayObservabilityEvent(event: GatewayObservabilityEvent) {
+  return (
+    gatewayObservabilityEventValues.has(event.event) &&
+    Boolean(normalizeDateTimeString(event.occurred_at)) &&
+    optionalValueIsTrimmedString(event.decision_id) &&
+    optionalValueIsTrimmedString(event.task_id) &&
+    optionalValueIsTrimmedString(event.dedupe_key) &&
+    !hasSecretLikeKey(event.metadata ?? {})
+  );
+}
+
 function normalizeGatewayMobileSession(value: unknown): GatewayMobileSession | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -244,6 +337,10 @@ function normalizeDateTimeString(value: unknown) {
   }
 
   return normalized;
+}
+
+function optionalValueIsTrimmedString(value: unknown) {
+  return value === undefined || Boolean(normalizeOptionalString(value));
 }
 
 function normalizeSameOriginUrl(value: unknown, gatewayBaseUrl: string) {
@@ -293,5 +390,20 @@ function isSecretLikeUrlKey(key: string) {
   const normalized = key.toLowerCase().replace(/-/g, "_");
   return (
     secretLikeUrlKeyNames.has(normalized) || secretLikeKeyPattern.test(key)
+  );
+}
+
+function hasSecretLikeKey(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(hasSecretLikeKey);
+  }
+
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  return Object.entries(value).some(
+    ([key, nestedValue]) =>
+      secretLikeKeyPattern.test(key) || hasSecretLikeKey(nestedValue)
   );
 }

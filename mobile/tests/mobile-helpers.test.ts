@@ -5,10 +5,12 @@ import {
   buildUnregisterDevicePayload
 } from "../src/api/attnClient";
 import {
+  buildGatewayObservabilityEventPayload,
   buildGatewayPairingExchangePayload,
   buildGatewayWebSessionTicketPayload,
   createGatewayWebSessionTicket,
-  exchangeGatewayPairingToken
+  exchangeGatewayPairingToken,
+  postGatewayObservabilityEvent
 } from "../src/api/gatewayClient";
 import { normalizeBackendUrl } from "../src/lib/backend";
 import { resolveItemUrlFromPayload } from "../src/lib/deepLinks";
@@ -372,6 +374,30 @@ describe("mobile helpers", () => {
     });
   });
 
+  it("builds gateway observability event payloads", () => {
+    expect(
+      buildGatewayObservabilityEventPayload({
+        event: {
+          event: "notification_opened",
+          occurred_at: "2026-06-25T10:00:00.000Z",
+          decision_id: "dec_123",
+          dedupe_key: "deploy:123",
+          metadata: {
+            route: "webview"
+          }
+        }
+      })
+    ).toEqual({
+      event: "notification_opened",
+      occurred_at: "2026-06-25T10:00:00.000Z",
+      decision_id: "dec_123",
+      dedupe_key: "deploy:123",
+      metadata: {
+        route: "webview"
+      }
+    });
+  });
+
   it("exchanges gateway pairing tokens with a configurable path", async () => {
     const calls: Array<{
       input: RequestInfo | URL;
@@ -599,6 +625,110 @@ describe("mobile helpers", () => {
       expires_at: "2026-06-25T10:05:00.000Z"
     });
     expect(new URL(ticket.web_session_url).origin).toBe(gatewayBaseUrl);
+  });
+
+  it("posts gateway observability events with a configurable path", async () => {
+    const calls: Array<{
+      input: RequestInfo | URL;
+      init?: RequestInit;
+    }> = [];
+
+    const result = await postGatewayObservabilityEvent(
+      {
+        gatewayBaseUrl: "https://decision-gateway.example.com"
+      },
+      {
+        observabilityPath: "/custom/observability",
+        event: {
+          event: "notification_opened",
+          occurred_at: "2026-06-25T10:00:00.000Z",
+          decision_id: "dec_123",
+          metadata: {
+            route: "webview"
+          }
+        },
+        fetchImpl: async (input, init) => {
+          calls.push({ input, init });
+          return new Response(null, {
+            status: 204
+          });
+        }
+      }
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(String(calls[0]?.input)).toBe(
+      "https://decision-gateway.example.com/custom/observability"
+    );
+    expect(calls[0]?.init?.headers).toEqual({
+      "Content-Type": "application/json"
+    });
+    expect(calls[0]?.init?.body).toBe(
+      JSON.stringify({
+        event: "notification_opened",
+        occurred_at: "2026-06-25T10:00:00.000Z",
+        decision_id: "dec_123",
+        metadata: {
+          route: "webview"
+        }
+      })
+    );
+    expect(result).toEqual({
+      status: 204
+    });
+  });
+
+  it("rejects unsafe gateway observability events without leaking response bodies", async () => {
+    const calls: Array<RequestInfo | URL> = [];
+
+    await expect(
+      postGatewayObservabilityEvent(
+        {
+          gatewayBaseUrl: "https://decision-gateway.example.com"
+        },
+        {
+          event: {
+            event: "webview_open_failed",
+            occurred_at: "2026-06-25T10:00:00.000Z",
+            metadata: {
+              nested: {
+                refresh_token: "do-not-log"
+              }
+            }
+          },
+          fetchImpl: async (input) => {
+            calls.push(input);
+            return new Response(null, { status: 204 });
+          }
+        }
+      )
+    ).rejects.toThrow("Gateway observability event was invalid.");
+    expect(calls).toHaveLength(0);
+
+    const httpFailure = postGatewayObservabilityEvent(
+      {
+        gatewayBaseUrl: "https://decision-gateway.example.com"
+      },
+      {
+        event: {
+          event: "webview_open_failed",
+          occurred_at: "2026-06-25T10:00:00.000Z",
+          metadata: {}
+        },
+        fetchImpl: async () =>
+          new Response("mobile_session_secret", {
+            status: 401,
+            statusText: "Unauthorized"
+          })
+      }
+    );
+
+    await expect(httpFailure).rejects.toThrow(
+      "Unable to post gateway observability event."
+    );
+    await expect(httpFailure.catch((error: unknown) => String(error))).resolves.not.toContain(
+      "mobile_session_secret"
+    );
   });
 
   it("rejects unsafe gateway web session ticket responses", async () => {
