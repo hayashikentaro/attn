@@ -10,6 +10,7 @@ import {
 } from "../src/api/gatewayClient";
 import { normalizeBackendUrl } from "../src/lib/backend";
 import { resolveItemUrlFromPayload } from "../src/lib/deepLinks";
+import { parseGatewayNotificationPayload } from "../src/lib/gatewayPayload";
 import {
   clearGatewayMobileSession,
   gatewayMobileSessionStorageKey,
@@ -80,6 +81,101 @@ describe("mobile helpers", () => {
     ).toBe("https://attn.example.com/items/abc%20123");
 
     expect(resolveItemUrlFromPayload({}, "https://attn.example.com")).toBeNull();
+  });
+
+  it("parses safe gateway notification payloads", () => {
+    const parsed = parseGatewayNotificationPayload(
+      {
+        decision_id: "dec_123",
+        decision_url: "https://decision-gateway.example.com/decisions/dec_123",
+        title: "Deployment approval",
+        summary: "Production deploy is waiting for a decision.",
+        urgency: "high",
+        dedupe_key: "deploy:123",
+        occurred_at: "2026-06-25T10:00:00.000Z"
+      },
+      "https://decision-gateway.example.com/"
+    );
+
+    expect(parsed).toEqual({
+      ok: true,
+      payload: {
+        decision_id: "dec_123",
+        decision_url: "https://decision-gateway.example.com/decisions/dec_123",
+        title: "Deployment approval",
+        summary: "Production deploy is waiting for a decision.",
+        urgency: "high",
+        dedupe_key: "deploy:123",
+        occurred_at: "2026-06-25T10:00:00.000Z"
+      }
+    });
+  });
+
+  it("rejects gateway notification payloads outside the gateway origin", () => {
+    expect(
+      parseGatewayNotificationPayload(
+        {
+          decision_id: "dec_123",
+          decision_url: "https://attacker.example.com/decisions/dec_123",
+          title: "Deployment approval",
+          summary: "Production deploy is waiting for a decision.",
+          urgency: "high",
+          dedupe_key: "deploy:123",
+          occurred_at: "2026-06-25T10:00:00.000Z"
+        },
+        "https://decision-gateway.example.com"
+      )
+    ).toEqual({
+      ok: false,
+      reason: "wrong_origin"
+    });
+  });
+
+  it("rejects gateway notification payloads with secret-like fields", () => {
+    expect(
+      parseGatewayNotificationPayload(
+        {
+          decision_id: "dec_123",
+          decision_url: "https://decision-gateway.example.com/decisions/dec_123",
+          title: "Deployment approval",
+          summary: "Production deploy is waiting for a decision.",
+          urgency: "high",
+          dedupe_key: "deploy:123",
+          occurred_at: "2026-06-25T10:00:00.000Z",
+          mobile_session_token: "do-not-put-this-in-push"
+        },
+        "https://decision-gateway.example.com"
+      )
+    ).toEqual({
+      ok: false,
+      reason: "secret_like_payload"
+    });
+  });
+
+  it("rejects gateway notification URLs with secret-like query or fragment keys", () => {
+    for (const decisionUrl of [
+      "https://decision-gateway.example.com/decisions/dec_123?token=secret",
+      "https://decision-gateway.example.com/decisions/dec_123#refresh_token=secret",
+      "https://decision-gateway.example.com/decisions/dec_123#/return?api_key=secret"
+    ]) {
+      expect(
+        parseGatewayNotificationPayload(
+          {
+            decision_id: "dec_123",
+            decision_url: decisionUrl,
+            title: "Deployment approval",
+            summary: "Production deploy is waiting for a decision.",
+            urgency: "high",
+            dedupe_key: "deploy:123",
+            occurred_at: "2026-06-25T10:00:00.000Z"
+          },
+          "https://decision-gateway.example.com"
+        )
+      ).toEqual({
+        ok: false,
+        reason: "secret_like_url"
+      });
+    }
   });
 
   it("builds pairing and device payloads without server ingest tokens", () => {
