@@ -1,8 +1,8 @@
 import { z } from "zod";
 import {
+  createGatewayOpenSessionRequestSchema,
+  createGatewayOpenSessionResponseSchema,
   gatewayObservabilityEventSchema,
-  gatewayOpenSessionRequestSchema,
-  gatewayOpenSessionResponseSchema,
   gatewayPairingExchangeRequestSchema,
   gatewayPairingExchangeResponseSchema,
   type GatewayObservabilityEvent,
@@ -99,7 +99,14 @@ export async function createWebSessionTicket(
   request: GatewayOpenSessionRequest,
   config?: DecisionGatewayClientConfig
 ): Promise<GatewayClientResult<GatewayOpenSessionResponse>> {
-  const parsed = gatewayOpenSessionRequestSchema.safeParse(request);
+  const resolvedConfig = resolveClientConfig(config);
+  if (!resolvedConfig.ok) {
+    return resolvedConfig;
+  }
+
+  const parsed = createGatewayOpenSessionRequestSchema({
+    gatewayOrigin: resolvedConfig.data.baseUrl
+  }).safeParse(request);
   if (!parsed.success) {
     return invalidValidationResult("invalid_request", parsed.error);
   }
@@ -107,8 +114,13 @@ export async function createWebSessionTicket(
   return postGatewayJson(
     "openSession",
     parsed.data,
-    gatewayOpenSessionResponseSchema,
-    config
+    createGatewayOpenSessionResponseSchema({
+      gatewayOrigin: resolvedConfig.data.baseUrl
+    }),
+    config,
+    {
+      resolvedConfig: resolvedConfig.data
+    }
   );
 }
 
@@ -137,19 +149,23 @@ async function postGatewayJson<T>(
   config?: DecisionGatewayClientConfig,
   options: {
     acceptEmptyBody?: boolean;
+    resolvedConfig?: ResolvedDecisionGatewayClientConfig;
   } = {}
 ): Promise<GatewayClientResult<T>> {
-  const resolvedConfig = resolveClientConfig(config);
-  if (!resolvedConfig.ok) {
-    return resolvedConfig;
+  const resolvedConfigResult = options.resolvedConfig
+    ? ({ ok: true, data: options.resolvedConfig } as const)
+    : resolveClientConfig(config);
+  if (!resolvedConfigResult.ok) {
+    return resolvedConfigResult;
   }
+  const resolvedConfig = resolvedConfigResult.data;
 
   const sensitiveValues = [
-    resolvedConfig.data.apiToken,
+    resolvedConfig.apiToken,
     ...collectStringValues(body)
   ].filter((value): value is string => Boolean(value));
   const controller = new AbortController();
-  const timeoutMs = resolvedConfig.data.timeoutMs;
+  const timeoutMs = resolvedConfig.timeoutMs;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<Response>((_, reject) => {
     timeout = setTimeout(() => {
@@ -161,14 +177,11 @@ async function postGatewayJson<T>(
 
   try {
     const response = await Promise.race([
-      resolvedConfig.data.fetchImpl(
-        buildGatewayUrl(
-          resolvedConfig.data.baseUrl,
-          resolvedConfig.data.paths[pathName]
-        ),
+      resolvedConfig.fetchImpl(
+        buildGatewayUrl(resolvedConfig.baseUrl, resolvedConfig.paths[pathName]),
         {
           method: "POST",
-          headers: buildHeaders(resolvedConfig.data.apiToken),
+          headers: buildHeaders(resolvedConfig.apiToken),
           body: JSON.stringify(body),
           signal: controller.signal
         }
@@ -218,13 +231,7 @@ async function postGatewayJson<T>(
 
 function resolveClientConfig(
   config: DecisionGatewayClientConfig = {}
-): GatewayClientResult<{
-  baseUrl: URL;
-  apiToken?: string;
-  fetchImpl: GatewayFetch;
-  timeoutMs: number;
-  paths: GatewayClientPaths;
-}> {
+): GatewayClientResult<ResolvedDecisionGatewayClientConfig> {
   const env = config.env ?? process.env;
   const rawBaseUrl = config.baseUrl ?? env.DECISION_GATEWAY_BASE_URL;
 
@@ -264,6 +271,14 @@ function resolveClientConfig(
       }
     }
   };
+}
+
+interface ResolvedDecisionGatewayClientConfig {
+  baseUrl: URL;
+  apiToken?: string;
+  fetchImpl: GatewayFetch;
+  timeoutMs: number;
+  paths: GatewayClientPaths;
 }
 
 function buildGatewayUrl(baseUrl: URL, path: string) {

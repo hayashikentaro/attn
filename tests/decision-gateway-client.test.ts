@@ -95,6 +95,143 @@ describe("decision-gateway client", () => {
     });
   });
 
+  it("rejects open-session decision URLs outside the configured gateway origin", async () => {
+    const calls: Array<RequestInfo | URL> = [];
+    const result = await createWebSessionTicket(
+      {
+        mobile_session_token: "mobile_session_123",
+        decision_id: "dec_123",
+        decision_url: "https://attacker.example.com/decisions/dec_123"
+      },
+      {
+        baseUrl: "https://decision-gateway.example.com",
+        fetchImpl: async (input) => {
+          calls.push(input);
+          return jsonResponse({
+            web_session_url:
+              "https://decision-gateway.example.com/mobile/session/ticket_123",
+            expires_at: "2026-06-25T10:05:00.000Z"
+          });
+        }
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(calls).toHaveLength(0);
+    if (!result.ok) {
+      expect(result.error).toBe("invalid_request");
+      expect(result.metadata.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: "decision_url",
+            message: "Decision URL must match gateway origin"
+          })
+        ])
+      );
+    }
+  });
+
+  it("rejects web session URLs outside the configured gateway origin", async () => {
+    const result = await createWebSessionTicket(
+      {
+        mobile_session_token: "mobile_session_123",
+        decision_id: "dec_123",
+        decision_url: "https://decision-gateway.example.com/decisions/dec_123"
+      },
+      {
+        baseUrl: "https://decision-gateway.example.com",
+        fetchImpl: async () =>
+          jsonResponse({
+            web_session_url:
+              "https://attacker.example.com/mobile/session/ticket_123",
+            expires_at: "2026-06-25T10:05:00.000Z"
+          })
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("invalid_response");
+      expect(result.metadata.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: "web_session_url",
+            message: "Web session URL must match gateway origin"
+          })
+        ])
+      );
+    }
+  });
+
+  it("rejects open-session URLs with credential-like URL parameters", async () => {
+    const result = await createWebSessionTicket(
+      {
+        mobile_session_token: "mobile_session_123",
+        decision_id: "dec_123",
+        decision_url:
+          "https://decision-gateway.example.com/decisions/dec_123?token=secret"
+      },
+      {
+        baseUrl: "https://decision-gateway.example.com",
+        fetchImpl: async () =>
+          jsonResponse({
+            web_session_url:
+              "https://decision-gateway.example.com/mobile/session/ticket_123",
+            expires_at: "2026-06-25T10:05:00.000Z"
+          })
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("invalid_request");
+      expect(result.metadata.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: "decision_url",
+            message: expect.stringContaining(
+              "URL must not include secret-like query or fragment keys"
+            )
+          })
+        ])
+      );
+    }
+  });
+
+  it("rejects web session URLs with credential-like URL parameters", async () => {
+    const result = await createWebSessionTicket(
+      {
+        mobile_session_token: "mobile_session_123",
+        decision_id: "dec_123",
+        decision_url: "https://decision-gateway.example.com/decisions/dec_123"
+      },
+      {
+        baseUrl: "https://decision-gateway.example.com",
+        fetchImpl: async () =>
+          jsonResponse({
+            web_session_url:
+              "https://decision-gateway.example.com/mobile/session/ticket_123#session_token=secret",
+            expires_at: "2026-06-25T10:05:00.000Z"
+          })
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("invalid_response");
+      expect(result.metadata.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: "web_session_url",
+            message: expect.stringContaining(
+              "URL must not include secret-like query or fragment keys"
+            )
+          })
+        ])
+      );
+    }
+  });
+
   it("posts observability events and accepts empty success responses", async () => {
     const result = await postObservabilityEvent(
       {
