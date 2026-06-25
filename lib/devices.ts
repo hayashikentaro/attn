@@ -39,6 +39,7 @@ export interface DeviceRepository {
   }): Promise<DeviceRecord>;
   revokeDevice(input: {
     device_id?: string;
+    subscriber_id?: string;
     provider?: DeviceProvider;
     device_token_hash?: string;
     revoked_at: string;
@@ -156,6 +157,7 @@ export function getPostgresDeviceRepository(): DeviceRepository {
             update subscriber_devices
             set revoked_at = ${input.revoked_at}
             where id = ${input.device_id}
+              and (${input.subscriber_id ?? null}::uuid is null or subscriber_id = ${input.subscriber_id ?? null})
             returning *
           `) as unknown as DbDeviceRow[])
         : ((await sql`
@@ -163,6 +165,7 @@ export function getPostgresDeviceRepository(): DeviceRepository {
             set revoked_at = ${input.revoked_at}
             where provider = ${input.provider ?? ""}
               and device_token_hash = ${input.device_token_hash ?? ""}
+              and (${input.subscriber_id ?? null}::uuid is null or subscriber_id = ${input.subscriber_id ?? null})
             returning *
           `) as unknown as DbDeviceRow[]);
       const [row] = rows;
@@ -180,9 +183,10 @@ export async function registerDevice(
     env?: NodeJS.ProcessEnv;
     now?: () => Date;
     updateNovuCredentials?: typeof updateNovuSubscriberCredentials;
+    subscriberId?: string;
   } = {}
 ) {
-  const subscriber = await resolveTargetSubscriber(input.subscriber_id, {
+  const subscriber = await resolveTargetSubscriber(options.subscriberId ?? input.subscriber_id, {
     repository: options.subscriberRepository,
     env: options.env
   });
@@ -218,13 +222,18 @@ export async function registerDevice(
 
 export async function unregisterDevice(
   input: UnregisterDeviceInput,
-  options: { deviceRepository?: DeviceRepository; now?: () => Date } = {}
+  options: {
+    deviceRepository?: DeviceRepository;
+    now?: () => Date;
+    subscriberId?: string;
+  } = {}
 ) {
   const deviceRepository =
     options.deviceRepository ?? getPostgresDeviceRepository();
 
   return deviceRepository.revokeDevice({
     device_id: input.device_id,
+    subscriber_id: options.subscriberId,
     provider: input.provider,
     device_token_hash: input.device_token
       ? hashDeviceToken(input.device_token)

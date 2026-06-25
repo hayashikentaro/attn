@@ -5,9 +5,21 @@ import { getHealthPayload } from "@/app/api/health/route";
 import { POST as postNotification } from "@/app/api/notifications/route";
 import { isIngestAuthorized } from "@/lib/auth";
 import {
+  createDevicePairingCode,
+  exchangeDevicePairingCode,
+  hashSecret,
+  verifyDeviceRegistrationToken,
+  type DevicePairingCodeRecord,
+  type DevicePairingCodeStatus,
+  type DevicePairingRepository,
+  type DeviceRegistrationTokenRecord,
+  type DeviceRegistrationTokenStatus
+} from "@/lib/device-pairing";
+import {
   hashDeviceToken,
   registerDevice,
   redactDevice,
+  unregisterDevice,
   type DeviceRecord,
   type DeviceRepository
 } from "@/lib/devices";
@@ -331,16 +343,22 @@ class MemoryDeviceRepository implements DeviceRepository {
 
   async revokeDevice(input: {
     device_id?: string;
+    subscriber_id?: string;
     provider?: DeviceProvider;
     device_token_hash?: string;
     revoked_at: string;
   }) {
     const device = input.device_id
-      ? this.devices.find((item) => item.id === input.device_id)
+      ? this.devices.find(
+          (item) =>
+            item.id === input.device_id &&
+            (!input.subscriber_id || item.subscriber_id === input.subscriber_id)
+        )
       : this.devices.find(
           (item) =>
             item.provider === input.provider &&
-            item.device_token_hash === input.device_token_hash
+            item.device_token_hash === input.device_token_hash &&
+            (!input.subscriber_id || item.subscriber_id === input.subscriber_id)
         );
 
     if (!device) {
@@ -350,6 +368,82 @@ class MemoryDeviceRepository implements DeviceRepository {
     device.revoked_at = input.revoked_at;
     device.updated_at = input.revoked_at;
     return device;
+  }
+}
+
+class MemoryDevicePairingRepository implements DevicePairingRepository {
+  pairingCodes: DevicePairingCodeRecord[] = [];
+  registrationTokens: DeviceRegistrationTokenRecord[] = [];
+
+  async createPairingCode(input: {
+    code_hash: string;
+    subscriber_id: string;
+    status: DevicePairingCodeStatus;
+    expires_at: string;
+    metadata_json?: JsonObject;
+  }) {
+    const now = new Date().toISOString();
+    const record: DevicePairingCodeRecord = {
+      id: randomUUID(),
+      code_hash: input.code_hash,
+      subscriber_id: input.subscriber_id,
+      status: input.status,
+      expires_at: input.expires_at,
+      used_at: null,
+      metadata_json: input.metadata_json ?? {},
+      created_at: now,
+      updated_at: now
+    };
+
+    this.pairingCodes.push(record);
+    return record;
+  }
+
+  async findPairingCodeByHash(codeHash: string) {
+    return this.pairingCodes.find((record) => record.code_hash === codeHash) ?? null;
+  }
+
+  async markPairingCodeUsed(id: string, usedAt: string) {
+    const record = this.pairingCodes.find((item) => item.id === id);
+    if (!record) {
+      return null;
+    }
+
+    record.status = "used";
+    record.used_at = usedAt;
+    record.updated_at = usedAt;
+    return record;
+  }
+
+  async createRegistrationToken(input: {
+    token_hash: string;
+    subscriber_id: string;
+    status: DeviceRegistrationTokenStatus;
+    expires_at: string;
+    metadata_json?: JsonObject;
+  }) {
+    const now = new Date().toISOString();
+    const record: DeviceRegistrationTokenRecord = {
+      id: randomUUID(),
+      token_hash: input.token_hash,
+      subscriber_id: input.subscriber_id,
+      status: input.status,
+      expires_at: input.expires_at,
+      revoked_at: null,
+      metadata_json: input.metadata_json ?? {},
+      created_at: now,
+      updated_at: now
+    };
+
+    this.registrationTokens.push(record);
+    return record;
+  }
+
+  async findRegistrationTokenByHash(tokenHash: string) {
+    return (
+      this.registrationTokens.find((record) => record.token_hash === tokenHash) ??
+      null
+    );
   }
 }
 
@@ -940,6 +1034,193 @@ describe("notifications", () => {
       external_id: "default-human",
       novu_subscriber_id: "novu-human"
     });
+  });
+
+  it("creates pairing codes by storing only a hash", async () => {
+    const subscriberRepository = new MemorySubscriberRepository();
+    const pairingRepository = new MemoryDevicePairingRepository();
+
+    const result = await createDevicePairingCode(
+      {
+        expires_in_minutes: 10,
+        metadata: {
+          source: "manual-test"
+        }
+      },
+      {
+        subscriberRepository,
+        repository: pairingRepository,
+        generateCode: () => "ABCD-EFGH",
+        now: () => new Date("2026-06-25T12:00:00.000Z")
+      }
+    );
+
+    expect(result.pairing_code).toBe("ABCD-EFGH");
+    expect(pairingRepository.pairingCodes).toHaveLength(1);
+    expect(pairingRepository.pairingCodes[0]).toMatchObject({
+      code_hash: hashSecret("ABCDEFGH"),
+      status: "pending",
+      expires_at: "2026-06-25T12:10:00.000Z"
+    });
+    expect(JSON.stringify(pairingRepository.pairingCodes[0])).not.toContain(
+      "ABCD-EFGH"
+    );
+  });
+
+  it("rejects expired pairing codes", async () => {
+    const subscriberRepository = new MemorySubscriberRepository();
+    const pairingRepository = new MemoryDevicePairingRepository();
+
+    await createDevicePairingCode(
+      { expires_in_minutes: 1, metadata: {} },
+      {
+        subscriberRepository,
+        repository: pairingRepository,
+        generateCode: () => "EXPR-CODE",
+        now: () => new Date("2026-06-25T12:00:00.000Z")
+      }
+    );
+
+    await expect(
+      exchangeDevicePairingCode(
+        {
+          pairing_code: "EXPR-CODE",
+          metadata: {}
+        },
+        {
+          repository: pairingRepository,
+          now: () => new Date("2026-06-25T12:02:00.000Z")
+        }
+      )
+    ).rejects.toThrow("Pairing code has expired");
+  });
+
+  it("exchanges a pairing code once for a scoped registration token", async () => {
+    const subscriberRepository = new MemorySubscriberRepository();
+    const pairingRepository = new MemoryDevicePairingRepository();
+
+    const pairing = await createDevicePairingCode(
+      { expires_in_minutes: 10, metadata: {} },
+      {
+        subscriberRepository,
+        repository: pairingRepository,
+        generateCode: () => "PAIR-CODE",
+        now: () => new Date("2026-06-25T12:00:00.000Z")
+      }
+    );
+    const exchange = await exchangeDevicePairingCode(
+      {
+        pairing_code: "PAIR-CODE",
+        device_name: "iPhone",
+        metadata: {}
+      },
+      {
+        repository: pairingRepository,
+        generateToken: () => "attn_drt_test_registration_token",
+        now: () => new Date("2026-06-25T12:01:00.000Z")
+      }
+    );
+
+    expect(exchange).toMatchObject({
+      subscriber_id: pairing.subscriber.id,
+      registration_token: "attn_drt_test_registration_token",
+      registration_token_expires_at: "2026-06-26T12:01:00.000Z"
+    });
+    expect(exchange).not.toHaveProperty("pairing_code");
+    expect(pairingRepository.registrationTokens[0]).toMatchObject({
+      token_hash: hashSecret("attn_drt_test_registration_token"),
+      subscriber_id: pairing.subscriber.id,
+      status: "active"
+    });
+    expect(JSON.stringify(pairingRepository.registrationTokens[0])).not.toContain(
+      "attn_drt_test_registration_token"
+    );
+
+    await expect(
+      exchangeDevicePairingCode(
+        {
+          pairing_code: "PAIR-CODE",
+          metadata: {}
+        },
+        { repository: pairingRepository }
+      )
+    ).rejects.toThrow("Pairing code has already been used");
+  });
+
+  it("uses scoped registration tokens for device register and unregister", async () => {
+    const subscriberRepository = new MemorySubscriberRepository();
+    const pairingRepository = new MemoryDevicePairingRepository();
+    const deviceRepository = new MemoryDeviceRepository();
+
+    await createDevicePairingCode(
+      { expires_in_minutes: 10, metadata: {} },
+      {
+        subscriberRepository,
+        repository: pairingRepository,
+        generateCode: () => "REGI-CODE",
+        now: () => new Date("2026-06-25T12:00:00.000Z")
+      }
+    );
+    const exchange = await exchangeDevicePairingCode(
+      {
+        pairing_code: "REGI-CODE",
+        metadata: {}
+      },
+      {
+        repository: pairingRepository,
+        generateToken: () => "attn_drt_scoped_token",
+        now: () => new Date("2026-06-25T12:01:00.000Z")
+      }
+    );
+    const authorization = await verifyDeviceRegistrationToken(
+      exchange.registration_token,
+      {
+        repository: pairingRepository,
+        now: () => new Date("2026-06-25T12:02:00.000Z")
+      }
+    );
+
+    expect(
+      isIngestAuthorized(
+        new Headers({ Authorization: `Bearer ${exchange.registration_token}` }),
+        "server-token"
+      )
+    ).toBe(false);
+
+    const registered = await registerDevice(
+      {
+        platform: "expo",
+        provider: "expo",
+        device_token: "ExponentPushToken[scoped-secret]",
+        metadata: {}
+      },
+      {
+        subscriberRepository,
+        deviceRepository,
+        subscriberId: authorization.subscriber_id,
+        updateNovuCredentials: async () => ({ status: "skipped" }),
+        now: () => new Date("2026-06-25T12:02:00.000Z")
+      }
+    );
+
+    expect(registered.device.subscriber_id).toBe(authorization.subscriber_id);
+    expect(JSON.stringify(redactDevice(registered.device))).not.toContain(
+      "ExponentPushToken"
+    );
+
+    const revoked = await unregisterDevice(
+      {
+        provider: "expo",
+        device_token: "ExponentPushToken[scoped-secret]"
+      },
+      {
+        deviceRepository,
+        subscriberId: authorization.subscriber_id,
+        now: () => new Date("2026-06-25T12:03:00.000Z")
+      }
+    );
+
+    expect(revoked?.revoked_at).toBe("2026-06-25T12:03:00.000Z");
   });
 
   it("registers or updates a device without exposing raw tokens", async () => {

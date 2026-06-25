@@ -1,4 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getBearerToken, isAdminAuthorized } from "@/lib/auth";
+import {
+  DevicePairingError,
+  verifyDeviceRegistrationToken
+} from "@/lib/device-pairing";
 import { redactDevice, unregisterDevice } from "@/lib/devices";
 import {
   formatValidationError,
@@ -30,6 +35,24 @@ async function readJsonBody(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  let subscriberId: string | undefined;
+  const bearerToken = getBearerToken(request.headers);
+
+  try {
+    if (bearerToken) {
+      const authorization = await verifyDeviceRegistrationToken(bearerToken);
+      subscriberId = authorization.subscriber_id;
+    } else if (!isAdminAuthorized(request.headers)) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+  } catch (error) {
+    if (error instanceof DevicePairingError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const bodyResult = await readJsonBody(request);
   if ("error" in bodyResult) {
     return NextResponse.json(
@@ -46,7 +69,9 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const device = await unregisterDevice(parsed.data);
+    const device = await unregisterDevice(parsed.data, {
+      subscriberId
+    });
     if (!device) {
       return NextResponse.json({ error: "Device not found" }, { status: 404 });
     }

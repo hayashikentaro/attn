@@ -6,6 +6,7 @@ It does:
 
 - request notification permission on a real device;
 - obtain an Expo push token when permission is granted;
+- exchange a short-lived pairing code for a scoped registration token;
 - register the token with `POST /api/devices/register`;
 - unregister the token with `POST /api/devices/unregister`;
 - open the Attn queue or a configured test item URL;
@@ -24,14 +25,13 @@ Copy `env.example` to `.env` or set Expo public environment variables:
 
 ```env
 EXPO_PUBLIC_ATTN_BACKEND_URL=http://localhost:3999
-EXPO_PUBLIC_ATTN_DEFAULT_SUBSCRIBER_ID=
 EXPO_PUBLIC_ATTN_TEST_ITEM_URL=
 EXPO_PUBLIC_EXPO_PROJECT_ID=
 ```
 
 `EXPO_PUBLIC_ATTN_BACKEND_URL` must point to the deployed or local Attn backend. A physical device cannot reach `localhost` on your laptop; use a reachable LAN, tunnel, or deployed URL.
 
-`EXPO_PUBLIC_ATTN_DEFAULT_SUBSCRIBER_ID` is optional. If omitted, the backend uses its default subscriber strategy.
+Do not place `ATTN_INGEST_TOKEN` or any server-wide secret in this app. Expo public variables are bundled into the client. This shell uses pairing codes and scoped registration tokens instead.
 
 `EXPO_PUBLIC_ATTN_TEST_ITEM_URL` is optional and only powers the "Open test item URL" button.
 
@@ -49,9 +49,32 @@ npm run start
 
 Run on a real iOS or Android device for push-token testing. Simulators may not provide usable push tokens.
 
-## Device Registration
+## Pairing And Device Registration
 
-The app sends this backend-compatible payload:
+Create a pairing code from a trusted backend/admin context:
+
+```bash
+curl -X POST http://localhost:3999/api/devices/pairing-codes \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ATTN_INGEST_TOKEN" \
+  -d '{ "expires_in_minutes": 10, "metadata": { "reason": "mobile setup" } }'
+```
+
+Enter the returned `pairing_code` in the mobile app and tap **Pair device**. The app exchanges it with:
+
+```json
+{
+  "pairing_code": "ABCD-EFGH",
+  "device_name": "Attn mobile device",
+  "metadata": {
+    "app": "attn-mobile"
+  }
+}
+```
+
+The backend returns a scoped `registration_token`. This shell stores it only in React state for now; closing the app loses it. That is acceptable for the current test shell and should be replaced with secure local storage before production use.
+
+After pairing, registration sends:
 
 ```json
 {
@@ -67,7 +90,15 @@ The app sends this backend-compatible payload:
 
 Raw tokens are kept in memory only for register/unregister calls. The UI displays a redacted preview, and the backend response should expose only `device_token_hash`.
 
-Unregister sends:
+Register and unregister include:
+
+```http
+Authorization: Bearer <scoped device registration token>
+```
+
+The token is not `ATTN_INGEST_TOKEN` and cannot ingest notifications or create pairing codes.
+
+Unregister sends the same scoped token plus:
 
 ```json
 {
@@ -109,11 +140,13 @@ The full Expo runtime path still needs `npm install` and a physical device for m
 2. Configure backend URL in the mobile app.
 3. Run mobile app on a real device.
 4. Request notification permission.
-5. Register device.
-6. Confirm the device row in the backend.
-7. Configure Novu and Expo/APNs/FCM credentials.
-8. Trigger a high-priority decision item.
-9. Receive Push.
-10. Tap Push and open the Attn item.
+5. Create a pairing code from a trusted backend/admin context.
+6. Pair the mobile app.
+7. Register device.
+8. Confirm the device row in the backend.
+9. Configure Novu and Expo/APNs/FCM credentials.
+10. Trigger a high-priority decision item.
+11. Receive Push.
+12. Tap Push and open the Attn item.
 
-Do not claim real Push works until steps 7-10 have been verified with live credentials and a real device.
+Do not claim real Push works until steps 9-12 have been verified with live credentials and a real device.

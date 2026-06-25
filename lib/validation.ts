@@ -119,6 +119,18 @@ export const unregisterDeviceInputSchema = z
     message: "Provide either device_id or provider and device_token"
   });
 
+export const createDevicePairingCodeInputSchema = z.object({
+  subscriber_id: optionalTrimmedString,
+  expires_in_minutes: z.coerce.number().int().min(1).max(60).default(10),
+  metadata: jsonObjectSchema.default({})
+});
+
+export const pairDeviceInputSchema = z.object({
+  pairing_code: requiredTrimmedString.max(128),
+  device_name: optionalTrimmedString,
+  metadata: jsonObjectSchema.default({})
+});
+
 export type CreateNotificationInput = z.input<
   typeof createNotificationInputSchema
 >;
@@ -127,6 +139,10 @@ export type SnoozeInput = z.infer<typeof snoozeInputSchema>;
 export type DecisionInput = z.infer<typeof decisionInputSchema>;
 export type RegisterDeviceInput = z.infer<typeof registerDeviceInputSchema>;
 export type UnregisterDeviceInput = z.infer<typeof unregisterDeviceInputSchema>;
+export type CreateDevicePairingCodeInput = z.infer<
+  typeof createDevicePairingCodeInputSchema
+>;
+export type PairDeviceInput = z.infer<typeof pairDeviceInputSchema>;
 
 export function formatValidationError(error: z.ZodError) {
   return {

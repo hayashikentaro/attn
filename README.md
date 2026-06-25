@@ -67,6 +67,11 @@ If `ATTN_INGEST_TOKEN` is set, ingestion requires either:
 
 If `ATTN_INGEST_TOKEN` is not set, ingestion is open for local development.
 
+Do not put `ATTN_INGEST_TOKEN` in the mobile app or any `EXPO_PUBLIC_*`
+variable. Expo public variables are bundled into the client. Mobile device
+registration uses short-lived pairing codes and scoped device registration
+tokens instead.
+
 ## Create Demo Data
 
 After the migration is applied:
@@ -172,13 +177,44 @@ Health check:
 curl http://localhost:3999/api/health
 ```
 
-Device register for a future mobile shell:
+Create a short-lived device pairing code. This is an admin/server action and
+requires `ATTN_INGEST_TOKEN`:
+
+```bash
+curl -X POST http://localhost:3999/api/devices/pairing-codes \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ATTN_INGEST_TOKEN" \
+  -d '{
+    "expires_in_minutes": 10,
+    "metadata": {
+      "reason": "mobile setup"
+    }
+  }'
+```
+
+Exchange the pairing code from the mobile app or a test client:
+
+```bash
+curl -X POST http://localhost:3999/api/devices/pair \
+  -H "Content-Type: application/json" \
+  -d '{
+    "pairing_code": "ABCD-EFGH",
+    "device_name": "iPhone",
+    "metadata": {
+      "app": "attn-mobile"
+    }
+  }'
+```
+
+Register a future Push device using the scoped registration token returned by
+the pairing exchange:
 
 ```bash
 curl -X POST http://localhost:3999/api/devices/register \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ATTN_DEVICE_REGISTRATION_TOKEN" \
   -d '{
-    "platform": "ios",
+    "platform": "expo",
     "provider": "expo",
     "device_token": "ExponentPushToken[...]",
     "device_name": "iPhone",
@@ -186,16 +222,21 @@ curl -X POST http://localhost:3999/api/devices/register \
   }'
 ```
 
-Device unregister:
+Unregister with the same scoped registration token:
 
 ```bash
 curl -X POST http://localhost:3999/api/devices/unregister \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ATTN_DEVICE_REGISTRATION_TOKEN" \
   -d '{
     "provider": "expo",
     "device_token": "ExponentPushToken[...]"
   }'
 ```
+
+Trusted server-side/manual tooling may use `x-attn-token: $ATTN_INGEST_TOKEN`
+for device register/unregister when `ATTN_INGEST_TOKEN` is configured. Mobile
+clients should not use that path.
 
 ## API
 
@@ -208,8 +249,10 @@ curl -X POST http://localhost:3999/api/devices/unregister \
 - `POST /api/notifications/[id]/resolve` marks done.
 - `POST /api/notifications/[id]/reopen` moves the item back to new.
 - `POST /api/notifications/[id]/decision` records `decision:<value>` for checkpoint-style items.
-- `POST /api/devices/register` creates or updates a future Push device record. Raw device tokens are accepted by the API but are not returned.
-- `POST /api/devices/unregister` revokes a device by id or by provider plus device token.
+- `POST /api/devices/pairing-codes` creates a short-lived pairing code. It is protected by `ATTN_INGEST_TOKEN` and returns the raw code only once.
+- `POST /api/devices/pair` exchanges a pairing code for a scoped device registration token.
+- `POST /api/devices/register` creates or updates a future Push device record using the scoped registration token. Raw device tokens are accepted by the API but are not returned.
+- `POST /api/devices/unregister` revokes a device by id or by provider plus device token using the scoped registration token.
 
 Allowed decisions are `approve`, `approve_with_condition`, `reject`, `ask_follow_up`, and `suspend`.
 
@@ -244,6 +287,8 @@ Attn now has a minimal subscriber and device-token foundation for the future mob
 
 If an incoming device registration does not specify `subscriber_id`, Attn uses a default subscriber. The default external id is `ATTN_DEFAULT_SUBSCRIBER_EXTERNAL_ID` or `attn-operator`; the default Novu subscriber id is `NOVU_SUBSCRIBER_ID` or the same external id.
 
+Mobile device registration starts with a pairing code. The backend stores only `code_hash`, then exchanges a valid, unused, unexpired code for a short-lived scoped device registration token. That token is only accepted by device register/unregister endpoints; it is not an ingest token and does not allow admin actions.
+
 Device registration stores `device_token_hash` for identification and debugging. Raw device tokens are not returned in API responses and are not stored in this pass. Unregistering a device sets `revoked_at` instead of hard-deleting it, so revoked devices can be excluded from future push delivery.
 
 Mobile Push is intentionally not implemented yet. This pass stops at backend foundations because real Push still requires provider credentials, a mobile shell, and device-token lifecycle verification.
@@ -255,10 +300,12 @@ Next steps for real Push:
 1. Configure Novu for the real workflow and subscriber credentials.
 2. Configure `EXPO_PUBLIC_ATTN_BACKEND_URL` in `mobile/`.
 3. Run the mobile shell on a real device.
-4. Get an Expo, FCM, or APNs device token.
-5. Register the token through `/api/devices/register`.
-6. Trigger a notification that routes toward Novu/Push.
-7. Tap the push notification to open the Attn item.
+4. Create a pairing code from the backend.
+5. Pair the mobile app and receive a scoped registration token.
+6. Get an Expo, FCM, or APNs device token.
+7. Register the token through `/api/devices/register`.
+8. Trigger a notification that routes toward Novu/Push.
+9. Tap the push notification to open the Attn item.
 
 ## Slack Fan-Out
 

@@ -8,7 +8,6 @@
     "platforms": ["ios", "android"],
     "extra": {
       "attnBackendUrl": "http://localhost:3999",
-      "attnDefaultSubscriberId": "",
       "attnTestItemUrl": "",
       "expoProjectId": ""
     }

@@ -3,7 +3,6 @@ import { normalizeBackendUrl } from "./lib/backend";
 
 interface ExpoExtra {
   attnBackendUrl?: string;
-  attnDefaultSubscriberId?: string;
   attnTestItemUrl?: string;
   expoProjectId?: string;
 }
@@ -20,10 +19,6 @@ export function getMobileConfig() {
 
   return {
     backendUrl,
-    defaultSubscriberId:
-      process.env.EXPO_PUBLIC_ATTN_DEFAULT_SUBSCRIBER_ID ||
-      extra.attnDefaultSubscriberId ||
-      null,
     testItemUrl:
       process.env.EXPO_PUBLIC_ATTN_TEST_ITEM_URL ||
       extra.attnTestItemUrl ||

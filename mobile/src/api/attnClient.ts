@@ -2,21 +2,36 @@ import { joinBackendPath } from "../lib/backend";
 
 export interface AttnMobileConfig {
   backendUrl: string | null;
-  defaultSubscriberId?: string | null;
 }
 
 export interface RegisterDeviceOptions {
   deviceToken: string;
+  registrationToken: string;
   deviceName?: string | null;
   metadata?: Record<string, unknown>;
 }
 
+export interface PairDeviceOptions {
+  pairingCode: string;
+  deviceName?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export function buildPairDevicePayload(options: PairDeviceOptions) {
+  return {
+    pairing_code: options.pairingCode,
+    device_name: options.deviceName || undefined,
+    metadata: {
+      app: "attn-mobile",
+      ...(options.metadata ?? {})
+    }
+  };
+}
+
 export function buildRegisterDevicePayload(
-  config: AttnMobileConfig,
   options: RegisterDeviceOptions
 ) {
   return {
-    subscriber_id: config.defaultSubscriberId || undefined,
     platform: "expo",
     provider: "expo",
     device_token: options.deviceToken,
@@ -56,6 +71,30 @@ function toSafeErrorMessage(body: unknown, fallback: string) {
   return fallback;
 }
 
+export async function pairDevice(
+  config: AttnMobileConfig,
+  options: PairDeviceOptions
+) {
+  if (!config.backendUrl) {
+    throw new Error("Attn backend URL is not configured.");
+  }
+
+  const response = await fetch(joinBackendPath(config.backendUrl, "/api/devices/pair"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(buildPairDevicePayload(options))
+  });
+  const body = await parseSafeJson(response);
+
+  if (!response.ok) {
+    throw new Error(toSafeErrorMessage(body, "Unable to pair device."));
+  }
+
+  return body;
+}
+
 export async function registerDevice(
   config: AttnMobileConfig,
   options: RegisterDeviceOptions
@@ -67,9 +106,10 @@ export async function registerDevice(
   const response = await fetch(joinBackendPath(config.backendUrl, "/api/devices/register"), {
     method: "POST",
     headers: {
+      Authorization: `Bearer ${options.registrationToken}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(buildRegisterDevicePayload(config, options))
+    body: JSON.stringify(buildRegisterDevicePayload(options))
   });
   const body = await parseSafeJson(response);
 
@@ -82,7 +122,8 @@ export async function registerDevice(
 
 export async function unregisterDevice(
   config: AttnMobileConfig,
-  deviceToken: string
+  deviceToken: string,
+  registrationToken: string
 ) {
   if (!config.backendUrl) {
     throw new Error("Attn backend URL is not configured.");
@@ -93,6 +134,7 @@ export async function unregisterDevice(
     {
       method: "POST",
       headers: {
+        Authorization: `Bearer ${registrationToken}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify(buildUnregisterDevicePayload(deviceToken))

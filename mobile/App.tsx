@@ -7,10 +7,11 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View
 } from "react-native";
 import * as Notifications from "expo-notifications";
-import { registerDevice, unregisterDevice } from "./src/api/attnClient";
+import { pairDevice, registerDevice, unregisterDevice } from "./src/api/attnClient";
 import { getMobileConfig } from "./src/config";
 import { openAttnItemFromPayload } from "./src/openAttnItem";
 import { requestExpoPushToken } from "./src/push";
@@ -43,10 +44,13 @@ export default function App() {
   const config = useMemo(() => getMobileConfig(), []);
   const [pushToken, setPushToken] = useState<string | null>(null);
   const [registeredHash, setRegisteredHash] = useState<string | null>(null);
+  const [pairingCode, setPairingCode] = useState("");
+  const [registrationToken, setRegistrationToken] = useState<string | null>(null);
+  const [pairedSubscriberId, setPairedSubscriberId] = useState<string | null>(null);
   const [permissionStatus, setPermissionStatus] = useState("not requested");
   const [registrationStatus, setRegistrationStatus] =
     useState<RegistrationState>("idle");
-  const [message, setMessage] = useState("Ready for device registration.");
+  const [message, setMessage] = useState("Ready for device pairing.");
 
   useEffect(() => {
     const subscription = Notifications.addNotificationResponseReceivedListener(
@@ -71,9 +75,48 @@ export default function App() {
     }
   }
 
+  async function pairCurrentDevice() {
+    if (!pairingCode.trim()) {
+      Alert.alert("Pairing code required", "Enter the code shown by Attn.");
+      return;
+    }
+
+    setRegistrationStatus("working");
+    setMessage("Pairing this device with Attn.");
+
+    try {
+      const result = (await pairDevice(config, {
+        pairingCode,
+        deviceName: "Attn mobile device",
+        metadata: {
+          app: "attn-mobile"
+        }
+      })) as {
+        subscriber_id?: string;
+        registration_token?: string;
+      };
+
+      if (!result.registration_token || !result.subscriber_id) {
+        throw new Error("Pairing response was missing registration credentials.");
+      }
+
+      setRegistrationToken(result.registration_token);
+      setPairedSubscriberId(result.subscriber_id);
+      setRegistrationStatus("idle");
+      setMessage("Device paired. You can now register the push token.");
+    } catch (error) {
+      setRegistrationStatus("failed");
+      setMessage(error instanceof Error ? error.message : "Pairing failed.");
+    }
+  }
+
   async function registerCurrentDevice() {
     if (!pushToken) {
       Alert.alert("No push token", "Request notification permission first.");
+      return;
+    }
+    if (!registrationToken) {
+      Alert.alert("Not paired", "Pair this device before registering it.");
       return;
     }
 
@@ -83,6 +126,7 @@ export default function App() {
     try {
       const result = (await registerDevice(config, {
         deviceToken: pushToken,
+        registrationToken,
         deviceName: "Attn mobile device",
         metadata: {
           app: "attn-mobile"
@@ -103,12 +147,16 @@ export default function App() {
       Alert.alert("No push token", "A push token is needed to unregister by token.");
       return;
     }
+    if (!registrationToken) {
+      Alert.alert("Not paired", "Pair this device before unregistering it.");
+      return;
+    }
 
     setRegistrationStatus("working");
     setMessage("Unregistering this device.");
 
     try {
-      await unregisterDevice(config, pushToken);
+      await unregisterDevice(config, pushToken, registrationToken);
       setRegisteredHash(null);
       setRegistrationStatus("unregistered");
       setMessage("Device unregistered.");
@@ -149,6 +197,10 @@ export default function App() {
           <Text style={styles.value}>{permissionStatus}</Text>
           <Text style={styles.label}>Device registration</Text>
           <Text style={styles.value}>{registrationStatus}</Text>
+          <Text style={styles.label}>Pairing</Text>
+          <Text style={styles.value}>
+            {registrationToken ? `paired to ${pairedSubscriberId}` : "not paired"}
+          </Text>
           <Text style={styles.label}>Push token preview</Text>
           <Text style={styles.value}>{redactToken(pushToken)}</Text>
           <Text style={styles.label}>Registered token hash</Text>
@@ -156,14 +208,37 @@ export default function App() {
         </View>
 
         <View style={styles.actions}>
+          <TextInput
+            autoCapitalize="characters"
+            autoCorrect={false}
+            onChangeText={setPairingCode}
+            placeholder="Pairing code"
+            style={styles.input}
+            value={pairingCode}
+          />
+          <Button
+            disabled={!config.backendUrl || registrationStatus === "working"}
+            label="Pair device"
+            onPress={pairCurrentDevice}
+          />
           <Button label="Request notification permission" onPress={requestPermission} />
           <Button
-            disabled={!config.backendUrl || !pushToken || registrationStatus === "working"}
+            disabled={
+              !config.backendUrl ||
+              !pushToken ||
+              !registrationToken ||
+              registrationStatus === "working"
+            }
             label="Register device"
             onPress={registerCurrentDevice}
           />
           <Button
-            disabled={!config.backendUrl || !pushToken || registrationStatus === "working"}
+            disabled={
+              !config.backendUrl ||
+              !pushToken ||
+              !registrationToken ||
+              registrationStatus === "working"
+            }
             label="Unregister device"
             onPress={unregisterCurrentDevice}
           />
@@ -222,6 +297,16 @@ const styles = StyleSheet.create({
   },
   actions: {
     gap: 10
+  },
+  input: {
+    backgroundColor: "#ffffff",
+    borderColor: "#d8d8d3",
+    borderRadius: 8,
+    borderWidth: 1,
+    color: "#181818",
+    fontSize: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 12
   },
   button: {
     alignItems: "center",

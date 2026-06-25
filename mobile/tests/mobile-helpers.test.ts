@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildPairDevicePayload,
   buildRegisterDevicePayload,
   buildUnregisterDevicePayload
 } from "../src/api/attnClient";
@@ -50,23 +51,34 @@ describe("mobile helpers", () => {
     expect(resolveItemUrlFromPayload({}, "https://attn.example.com")).toBeNull();
   });
 
-  it("builds backend-compatible device payloads", () => {
+  it("builds pairing and device payloads without server ingest tokens", () => {
     expect(
-      buildRegisterDevicePayload(
-        {
-          backendUrl: "https://attn.example.com",
-          defaultSubscriberId: "subscriber-id"
-        },
-        {
-          deviceToken: "ExponentPushToken[secret]",
-          deviceName: "iPhone",
-          metadata: {
-            runtime: "expo-go"
-          }
+      buildPairDevicePayload({
+        pairingCode: "ABCD-EFGH",
+        deviceName: "iPhone",
+        metadata: {
+          runtime: "expo-go"
         }
-      )
+      })
     ).toEqual({
-      subscriber_id: "subscriber-id",
+      pairing_code: "ABCD-EFGH",
+      device_name: "iPhone",
+      metadata: {
+        app: "attn-mobile",
+        runtime: "expo-go"
+      }
+    });
+
+    expect(
+      buildRegisterDevicePayload({
+        deviceToken: "ExponentPushToken[secret]",
+        registrationToken: "attn_drt_registration_secret",
+        deviceName: "iPhone",
+        metadata: {
+          runtime: "expo-go"
+        }
+      })
+    ).toEqual({
       platform: "expo",
       provider: "expo",
       device_token: "ExponentPushToken[secret]",
