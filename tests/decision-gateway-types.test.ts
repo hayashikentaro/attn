@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  createGatewayOpenSessionRequestSchema,
+  createGatewayOpenSessionResponseSchema,
   createGatewayNotificationPayloadSchema,
   findGatewaySecretLikeKeys,
+  findGatewaySecretLikeUrlKeys,
   gatewayNotificationPayloadSchema,
   gatewayObservabilityEventSchema,
   gatewayOpenSessionRequestSchema,
@@ -107,6 +110,34 @@ describe("decision-gateway contract types", () => {
     }
   });
 
+  it("rejects decision URLs with secret-like query or fragment keys", () => {
+    for (const decisionUrl of [
+      "https://decision-gateway.example.com/decisions/dec_123?token=secret",
+      "https://decision-gateway.example.com/decisions/dec_123?access_token=secret",
+      "https://decision-gateway.example.com/decisions/dec_123#refresh_token=secret",
+      "https://decision-gateway.example.com/decisions/dec_123#/mobile?api_key=secret"
+    ]) {
+      const parsed = gatewayNotificationPayloadSchema.safeParse({
+        ...validNotificationPayload,
+        decision_url: decisionUrl
+      });
+
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              path: ["decision_url"],
+              message: expect.stringContaining(
+                "URL must not include secret-like query or fragment keys"
+              )
+            })
+          ])
+        );
+      }
+    }
+  });
+
   it("defines pairing, mobile session, and open-session contracts", () => {
     expect(
       gatewayPairingExchangeRequestSchema.safeParse({
@@ -147,6 +178,99 @@ describe("decision-gateway contract types", () => {
     ).toBe(true);
   });
 
+  it("constrains open-session decision URLs to the gateway origin", () => {
+    const schema = createGatewayOpenSessionRequestSchema({
+      gatewayOrigin: "https://decision-gateway.example.com"
+    });
+
+    expect(
+      schema.safeParse({
+        mobile_session_token: "mobile_session_123",
+        decision_id: "dec_123",
+        decision_url: "https://decision-gateway.example.com/decisions/dec_123"
+      }).success
+    ).toBe(true);
+
+    const parsed = schema.safeParse({
+      mobile_session_token: "mobile_session_123",
+      decision_id: "dec_123",
+      decision_url: "https://attacker.example.com/decisions/dec_123"
+    });
+
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: ["decision_url"],
+            message: "Decision URL must match gateway origin"
+          })
+        ])
+      );
+    }
+  });
+
+  it("constrains web session URLs to the gateway origin", () => {
+    const schema = createGatewayOpenSessionResponseSchema({
+      gatewayOrigin: "https://decision-gateway.example.com"
+    });
+
+    expect(
+      schema.safeParse({
+        web_session_url:
+          "https://decision-gateway.example.com/mobile/session/ticket_123",
+        expires_at: "2026-06-25T10:05:00.000Z"
+      }).success
+    ).toBe(true);
+
+    const parsed = schema.safeParse({
+      web_session_url: "https://attacker.example.com/mobile/session/ticket_123",
+      expires_at: "2026-06-25T10:05:00.000Z"
+    });
+
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: ["web_session_url"],
+            message: "Web session URL must match gateway origin"
+          })
+        ])
+      );
+    }
+  });
+
+  it("rejects web session URLs with secret-like query or fragment keys", () => {
+    for (const webSessionUrl of [
+      "https://decision-gateway.example.com/mobile/session/ticket_123?session_token=secret",
+      "https://decision-gateway.example.com/mobile/session/ticket_123?authorization=secret",
+      "https://decision-gateway.example.com/mobile/session/ticket_123#bearer=secret",
+      "https://decision-gateway.example.com/mobile/session/ticket_123#/return?credential=secret",
+      "https://decision-gateway.example.com/mobile/session/ticket_123?password=secret",
+      "https://decision-gateway.example.com/mobile/session/ticket_123#secret=secret"
+    ]) {
+      const parsed = gatewayOpenSessionResponseSchema.safeParse({
+        web_session_url: webSessionUrl,
+        expires_at: "2026-06-25T10:05:00.000Z"
+      });
+
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              path: ["web_session_url"],
+              message: expect.stringContaining(
+                "URL must not include secret-like query or fragment keys"
+              )
+            })
+          ])
+        );
+      }
+    }
+  });
+
   it("constrains observability events and rejects secret metadata", () => {
     expect(
       gatewayObservabilityEventSchema.safeParse({
@@ -184,5 +308,13 @@ describe("decision-gateway contract types", () => {
         nested: [{ api_key: "secret" }, { safe: "value" }]
       })
     ).toEqual([["nested", 0, "api_key"]]);
+  });
+
+  it("finds secret-like URL keys in query strings and fragments", () => {
+    expect(
+      findGatewaySecretLikeUrlKeys(
+        "https://decision-gateway.example.com/decisions/dec_123?auth=secret&safe=value#return?refresh_token=secret"
+      )
+    ).toEqual(["auth", "refresh_token"]);
   });
 });

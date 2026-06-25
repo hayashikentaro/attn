@@ -25,6 +25,32 @@ const urlString = z.string().trim().refine((value) => {
 const secretLikeKeyPattern =
   /(^|[_-])(access[_-]?token|api[_-]?key|auth|authorization|bearer|credential|password|refresh[_-]?token|secret|session[_-]?token|token)([_-]|$)/i;
 
+const secretLikeUrlKeyNames = new Set([
+  "access_token",
+  "api_key",
+  "auth",
+  "authorization",
+  "bearer",
+  "credential",
+  "password",
+  "refresh_token",
+  "secret",
+  "session_token",
+  "token"
+]);
+
+const gatewayNavigableUrlString = urlString.superRefine((value, context) => {
+  const keys = findGatewaySecretLikeUrlKeys(value);
+  if (keys.length === 0) {
+    return;
+  }
+
+  context.addIssue({
+    code: "custom",
+    message: `URL must not include secret-like query or fragment keys: ${keys.join(", ")}`
+  });
+});
+
 export const gatewayNotificationPriorityValues = [
   "low",
   "normal",
@@ -50,7 +76,7 @@ export const gatewayNotificationPayloadSchema = z
   .object({
     decision_id: optionalTrimmedString,
     task_id: optionalTrimmedString,
-    decision_url: urlString,
+    decision_url: gatewayNavigableUrlString,
     title: requiredTrimmedString,
     summary: requiredTrimmedString,
     urgency: z.enum(gatewayNotificationPriorityValues).optional(),
@@ -77,14 +103,7 @@ export function createGatewayNotificationPayloadSchema(options?: {
   gatewayOrigin?: string | URL;
 }) {
   return gatewayNotificationPayloadSchema.superRefine((value, context) => {
-    if (!options?.gatewayOrigin) {
-      return;
-    }
-
-    const expectedOrigin = new URL(options.gatewayOrigin).origin;
-    const actualOrigin = new URL(value.decision_url).origin;
-
-    if (actualOrigin !== expectedOrigin) {
+    if (!isGatewayOriginUrl(value.decision_url, options?.gatewayOrigin)) {
       context.addIssue({
         code: "custom",
         path: ["decision_url"],
@@ -126,7 +145,7 @@ export const gatewayPairingExchangeResponseSchema = z
 export const gatewayOpenSessionRequestSchema = z
   .object({
     mobile_session_token: gatewayMobileSessionTokenSchema,
-    decision_url: urlString,
+    decision_url: gatewayNavigableUrlString,
     decision_id: optionalTrimmedString,
     task_id: optionalTrimmedString
   })
@@ -138,7 +157,7 @@ export const gatewayOpenSessionRequestSchema = z
 
 export const gatewayOpenSessionResponseSchema = z
   .object({
-    web_session_url: urlString.optional(),
+    web_session_url: gatewayNavigableUrlString.optional(),
     web_session_ticket: optionalTrimmedString,
     expires_at: dateTimeString
   })
@@ -147,6 +166,37 @@ export const gatewayOpenSessionResponseSchema = z
     message: "Provide either web_session_url or web_session_ticket",
     path: ["web_session_url"]
   });
+
+export function createGatewayOpenSessionRequestSchema(options?: {
+  gatewayOrigin?: string | URL;
+}) {
+  return gatewayOpenSessionRequestSchema.superRefine((value, context) => {
+    if (!isGatewayOriginUrl(value.decision_url, options?.gatewayOrigin)) {
+      context.addIssue({
+        code: "custom",
+        path: ["decision_url"],
+        message: "Decision URL must match gateway origin"
+      });
+    }
+  });
+}
+
+export function createGatewayOpenSessionResponseSchema(options?: {
+  gatewayOrigin?: string | URL;
+}) {
+  return gatewayOpenSessionResponseSchema.superRefine((value, context) => {
+    if (
+      value.web_session_url &&
+      !isGatewayOriginUrl(value.web_session_url, options?.gatewayOrigin)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["web_session_url"],
+        message: "Web session URL must match gateway origin"
+      });
+    }
+  });
+}
 
 export const gatewayObservabilityEventSchema = z
   .object({
@@ -190,6 +240,66 @@ export function findGatewaySecretLikeKeys(
       ...findGatewaySecretLikeKeys(nestedValue, nestedPath)
     ];
   });
+}
+
+export function findGatewaySecretLikeUrlKeys(value: string): string[] {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return [];
+  }
+
+  return uniqueStrings([
+    ...findSecretLikeSearchParamKeys(url.searchParams),
+    ...findSecretLikeFragmentKeys(url.hash)
+  ]);
+}
+
+function isGatewayOriginUrl(value: string, gatewayOrigin: string | URL | undefined) {
+  if (!gatewayOrigin) {
+    return true;
+  }
+
+  try {
+    return new URL(value).origin === new URL(gatewayOrigin).origin;
+  } catch {
+    return false;
+  }
+}
+
+function findSecretLikeSearchParamKeys(params: URLSearchParams): string[] {
+  return Array.from(params.keys()).filter(isSecretLikeUrlKey);
+}
+
+function findSecretLikeFragmentKeys(hash: string): string[] {
+  const fragment = hash.replace(/^#/, "");
+  if (!fragment) {
+    return [];
+  }
+
+  const queryStart = fragment.indexOf("?");
+  const candidates =
+    queryStart >= 0 ? [fragment.slice(queryStart + 1)] : [fragment];
+
+  return uniqueStrings(
+    candidates.flatMap((candidate) =>
+      findSecretLikeSearchParamKeys(
+        new URLSearchParams(candidate.replace(/^\?/, ""))
+      )
+    )
+  );
+}
+
+function isSecretLikeUrlKey(key: string) {
+  const normalized = key.toLowerCase().replace(/-/g, "_");
+  return (
+    secretLikeUrlKeyNames.has(normalized) || secretLikeKeyPattern.test(key)
+  );
+}
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values));
 }
 
 export type GatewayNotificationPayload = z.infer<
