@@ -16,6 +16,8 @@ import { exchangeGatewayPairingToken } from "./src/api/gatewayClient";
 import { getMobileConfig } from "./src/config";
 import { openAttnItemFromPayload } from "./src/openAttnItem";
 import { requestExpoPushToken } from "./src/push";
+import { savePendingGatewayDecisionIntent } from "./src/lib/gatewayPendingIntentStorage";
+import { parseGatewayNotificationPayload } from "./src/lib/gatewayPayload";
 import {
   loadGatewayMobileSession,
   saveGatewayMobileSession
@@ -89,15 +91,47 @@ export default function App() {
   useEffect(() => {
     const subscription = Notifications.addNotificationResponseReceivedListener(
       (response) => {
-        void openAttnItemFromPayload(
-          response.notification.request.content.data,
-          config.backendUrl
-        );
+        void handleNotificationResponse(response.notification.request.content.data);
       }
     );
 
+    async function handleNotificationResponse(data: Record<string, unknown>) {
+      const gatewayPayload = parseGatewayNotificationPayload(
+        data,
+        config.gatewayBaseUrl
+      );
+
+      if (gatewayPayload.ok) {
+        try {
+          await savePendingGatewayDecisionIntent(
+            gatewayPayload.payload,
+            config.gatewayBaseUrl
+          );
+          const session = await loadGatewayMobileSession();
+
+          if (session) {
+            setGatewaySessionStatus("connected");
+            setGatewaySessionLabel(session.subject_label ?? null);
+            setMessage("Gateway decision is ready for WebView.");
+          } else {
+            setGatewaySessionStatus("missing");
+            setGatewaySessionLabel(null);
+            setMessage("Gateway pairing required before opening this decision.");
+          }
+        } catch {
+          setMessage("Unable to prepare Gateway decision.");
+        }
+        return;
+      }
+
+      const opened = await openAttnItemFromPayload(data, config.backendUrl);
+      if (!opened) {
+        setMessage("Notification did not include an openable item.");
+      }
+    }
+
     return () => subscription.remove();
-  }, [config.backendUrl]);
+  }, [config.backendUrl, config.gatewayBaseUrl]);
 
   async function requestPermission() {
     const result = await requestExpoPushToken(config.expoProjectId);
