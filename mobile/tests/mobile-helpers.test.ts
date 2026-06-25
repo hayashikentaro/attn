@@ -4,6 +4,10 @@ import {
   buildRegisterDevicePayload,
   buildUnregisterDevicePayload
 } from "../src/api/attnClient";
+import {
+  buildGatewayPairingExchangePayload,
+  exchangeGatewayPairingToken
+} from "../src/api/gatewayClient";
 import { normalizeBackendUrl } from "../src/lib/backend";
 import { resolveItemUrlFromPayload } from "../src/lib/deepLinks";
 import {
@@ -126,6 +130,8 @@ describe("mobile helpers", () => {
     const env = {
       EXPO_PUBLIC_ATTN_BACKEND_URL: "https://attn.example.com",
       EXPO_PUBLIC_ATTN_TEST_ITEM_URL: "https://attn.example.com/items/test",
+      EXPO_PUBLIC_DECISION_GATEWAY_BASE_URL:
+        "https://decision-gateway.example.com/",
       EXPO_PUBLIC_EXPO_PROJECT_ID: "expo-project",
       ATTN_INGEST_TOKEN: "server-secret"
     };
@@ -139,9 +145,147 @@ describe("mobile helpers", () => {
       )
     ).toEqual({
       backendUrl: "https://attn.example.com",
+      gatewayBaseUrl: "https://decision-gateway.example.com",
       testItemUrl: "https://attn.example.com/items/test",
       expoProjectId: "expo-project"
     });
+  });
+
+  it("builds gateway pairing payloads without Attn server tokens", () => {
+    expect(
+      buildGatewayPairingExchangePayload({
+        pairingToken: "gateway_pairing_secret",
+        deviceName: "iPhone",
+        metadata: {
+          runtime: "expo-go"
+        }
+      })
+    ).toEqual({
+      pairing_token: "gateway_pairing_secret",
+      device_name: "iPhone",
+      device_metadata: {
+        app: "attn-mobile",
+        runtime: "expo-go"
+      }
+    });
+  });
+
+  it("exchanges gateway pairing tokens with a configurable path", async () => {
+    const calls: Array<{
+      input: RequestInfo | URL;
+      init?: RequestInit;
+    }> = [];
+
+    const result = await exchangeGatewayPairingToken(
+      {
+        gatewayBaseUrl: "https://decision-gateway.example.com"
+      },
+      {
+        pairingToken: "gateway_pairing_secret",
+        deviceName: "iPhone",
+        pairingExchangePath: "/custom/pairing/exchange",
+        fetchImpl: async (input, init) => {
+          calls.push({ input, init });
+          return new Response(
+            JSON.stringify({
+              mobile_session: {
+                session_token: "mobile_session_secret",
+                refresh_token: "refresh_secret",
+                expires_at: "2026-07-25T10:00:00.000Z",
+                gateway_origin: "https://decision-gateway.example.com"
+              },
+              gateway_origin: "https://decision-gateway.example.com"
+            }),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/json"
+              }
+            }
+          );
+        }
+      }
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(String(calls[0]?.input)).toBe(
+      "https://decision-gateway.example.com/custom/pairing/exchange"
+    );
+    expect(calls[0]?.init?.headers).toEqual({
+      "Content-Type": "application/json"
+    });
+    expect(calls[0]?.init?.body).toBe(
+      JSON.stringify({
+        pairing_token: "gateway_pairing_secret",
+        device_name: "iPhone",
+        device_metadata: {
+          app: "attn-mobile"
+        }
+      })
+    );
+    expect(result).toEqual({
+      mobile_session: {
+        session_token: "mobile_session_secret",
+        refresh_token: "refresh_secret",
+        expires_at: "2026-07-25T10:00:00.000Z",
+        gateway_origin: "https://decision-gateway.example.com"
+      },
+      gateway_origin: "https://decision-gateway.example.com"
+    });
+  });
+
+  it("returns safe gateway pairing errors without token values", async () => {
+    await expect(
+      exchangeGatewayPairingToken(
+        {
+          gatewayBaseUrl: null
+        },
+        {
+          pairingToken: "gateway_pairing_secret"
+        }
+      )
+    ).rejects.toThrow("Decision Gateway URL is not configured.");
+
+    await expect(
+      exchangeGatewayPairingToken(
+        {
+          gatewayBaseUrl: "https://decision-gateway.example.com"
+        },
+        {
+          pairingToken: "gateway_pairing_secret",
+          fetchImpl: async () =>
+            new Response("gateway_pairing_secret", {
+              status: 401,
+              statusText: "Unauthorized"
+            })
+        }
+      )
+    ).rejects.toThrow("Unable to exchange gateway pairing token.");
+
+    await expect(
+      exchangeGatewayPairingToken(
+        {
+          gatewayBaseUrl: "https://decision-gateway.example.com"
+        },
+        {
+          pairingToken: "gateway_pairing_secret",
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                mobile_session: {
+                  refresh_token: "refresh_without_session"
+                }
+              }),
+              {
+                status: 200,
+                headers: {
+                  "content-type": "application/json"
+                }
+              }
+            )
+        }
+      )
+    ).rejects.toThrow("Gateway pairing response was invalid.");
   });
 
   it("saves, loads, and clears gateway mobile sessions through storage", async () => {
