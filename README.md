@@ -35,6 +35,8 @@ npm run dev
 
 Open `http://localhost:3999/queue`.
 
+The minimal future-Push mobile shell lives in `mobile/`. It is isolated from the web app and documented in `mobile/README.md`.
+
 ## Environment Variables
 
 Core:
@@ -246,14 +248,17 @@ Device registration stores `device_token_hash` for identification and debugging.
 
 Mobile Push is intentionally not implemented yet. This pass stops at backend foundations because real Push still requires provider credentials, a mobile shell, and device-token lifecycle verification.
 
+The `mobile/` Expo shell now covers the mobile-side foundation: permission request, Expo push token acquisition path, device registration/unregistration calls, queue/test-item opening, and future tap-to-open payload handling. It does not prove real Push delivery.
+
 Next steps for real Push:
 
 1. Configure Novu for the real workflow and subscriber credentials.
-2. Create a minimal mobile shell.
-3. Get an Expo, FCM, or APNs device token.
-4. Register the token through `/api/devices/register`.
-5. Trigger a notification that routes toward Novu/Push.
-6. Tap the push notification to open the Attn item.
+2. Configure `EXPO_PUBLIC_ATTN_BACKEND_URL` in `mobile/`.
+3. Run the mobile shell on a real device.
+4. Get an Expo, FCM, or APNs device token.
+5. Register the token through `/api/devices/register`.
+6. Trigger a notification that routes toward Novu/Push.
+7. Tap the push notification to open the Attn item.
 
 ## Slack Fan-Out
 
@@ -283,6 +288,14 @@ npm run lint
 npm run test
 npm run build
 git diff --check
+```
+
+Mobile helper checks:
+
+```bash
+cd mobile
+npm run typecheck
+npm run test
 ```
 
 Manual flow:

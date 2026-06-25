@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "Attn",
+    "slug": "attn-mobile",
+    "scheme": "attn",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "platforms": ["ios", "android"],
+    "extra": {
+      "attnBackendUrl": "http://localhost:3999",
+      "attnDefaultSubscriberId": "",
+      "attnTestItemUrl": "",
+      "expoProjectId": ""
+    }
+  }
+}

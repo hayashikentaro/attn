@@ -1,0 +1,85 @@
+import { describe, expect, it } from "vitest";
+import {
+  buildRegisterDevicePayload,
+  buildUnregisterDevicePayload
+} from "../src/api/attnClient";
+import { normalizeBackendUrl } from "../src/lib/backend";
+import { resolveItemUrlFromPayload } from "../src/lib/deepLinks";
+import { redactToken, tokenHashPreview } from "../src/lib/tokens";
+
+describe("mobile helpers", () => {
+  it("normalizes backend URLs", () => {
+    expect(normalizeBackendUrl(" https://attn.example.com/ ")).toBe(
+      "https://attn.example.com"
+    );
+    expect(normalizeBackendUrl("attn.example.com")).toBeNull();
+    expect(normalizeBackendUrl("file:///tmp/attn")).toBeNull();
+    expect(normalizeBackendUrl("")).toBeNull();
+  });
+
+  it("redacts push tokens and token hashes", () => {
+    expect(redactToken("ExponentPushToken[abcdef1234567890]")).toBe(
+      "Exponent...67890]"
+    );
+    expect(redactToken(null)).toBe("not available");
+    expect(tokenHashPreview("0123456789abcdef0123456789abcdef")).toBe(
+      "0123456789...89abcdef"
+    );
+  });
+
+  it("maps notification payloads to item URLs", () => {
+    expect(
+      resolveItemUrlFromPayload(
+        {
+          itemUrl: "https://attn.example.com/items/direct",
+          notificationId: "ignored"
+        },
+        "https://attn.example.com"
+      )
+    ).toBe("https://attn.example.com/items/direct");
+
+    expect(
+      resolveItemUrlFromPayload(
+        {
+          notificationId: "abc 123"
+        },
+        "https://attn.example.com/"
+      )
+    ).toBe("https://attn.example.com/items/abc%20123");
+
+    expect(resolveItemUrlFromPayload({}, "https://attn.example.com")).toBeNull();
+  });
+
+  it("builds backend-compatible device payloads", () => {
+    expect(
+      buildRegisterDevicePayload(
+        {
+          backendUrl: "https://attn.example.com",
+          defaultSubscriberId: "subscriber-id"
+        },
+        {
+          deviceToken: "ExponentPushToken[secret]",
+          deviceName: "iPhone",
+          metadata: {
+            runtime: "expo-go"
+          }
+        }
+      )
+    ).toEqual({
+      subscriber_id: "subscriber-id",
+      platform: "expo",
+      provider: "expo",
+      device_token: "ExponentPushToken[secret]",
+      device_name: "iPhone",
+      metadata: {
+        app: "attn-mobile",
+        runtime: "expo-go"
+      }
+    });
+
+    expect(buildUnregisterDevicePayload("ExponentPushToken[secret]")).toEqual({
+      provider: "expo",
+      device_token: "ExponentPushToken[secret]"
+    });
+  });
+});
