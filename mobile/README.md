@@ -6,9 +6,9 @@ It does:
 
 - request notification permission on a real device;
 - obtain an Expo push token when permission is granted;
-- exchange a short-lived pairing code for a scoped registration token;
-- register the token with `POST /api/devices/register`;
-- unregister the token with `POST /api/devices/unregister`;
+- exchange a Gateway pairing token for a Gateway mobile session;
+- store the Gateway mobile session in `expo-secure-store`;
+- keep legacy Attn device registration available for diagnostics;
 - open the Attn queue or a configured test item URL;
 - prepare tap-to-open handling for future payloads containing `itemUrl` or `notificationId`.
 
@@ -26,12 +26,15 @@ Copy `env.example` to `.env` or set Expo public environment variables:
 ```env
 EXPO_PUBLIC_ATTN_BACKEND_URL=http://localhost:3999
 EXPO_PUBLIC_ATTN_TEST_ITEM_URL=
+EXPO_PUBLIC_DECISION_GATEWAY_BASE_URL=
 EXPO_PUBLIC_EXPO_PROJECT_ID=
 ```
 
 `EXPO_PUBLIC_ATTN_BACKEND_URL` must point to the deployed or local Attn backend. A physical device cannot reach `localhost` on your laptop; use a reachable LAN, tunnel, or deployed URL.
 
 Do not place `ATTN_INGEST_TOKEN` or any server-wide secret in this app. Expo public variables are bundled into the client. This shell uses pairing codes and scoped registration tokens instead.
+
+`EXPO_PUBLIC_DECISION_GATEWAY_BASE_URL` points the mobile shell at the Decision Gateway origin for Gateway pairing. Do not put Gateway session tokens, API tokens, or one-time web-session tickets in Expo public variables.
 
 `EXPO_PUBLIC_ATTN_TEST_ITEM_URL` is optional and only powers the "Open test item URL" button.
 
@@ -54,21 +57,49 @@ For first-device setup:
 1. Start or deploy the Attn backend.
 2. Apply backend migrations with `npm run migrate`.
 3. Set `EXPO_PUBLIC_ATTN_BACKEND_URL` to a URL the device can reach.
-4. From the repository root, run `npm run check:env -- --target=mobile --strict` in a shell where `EXPO_PUBLIC_ATTN_BACKEND_URL` is exported.
-5. Run `npm run start`.
-6. Open the Expo app on a real device.
-7. Create a pairing code from a trusted backend/admin shell.
-8. Enter the pairing code in the app and tap **Pair device**.
-9. Tap **Request notification permission**.
-10. Tap **Register device**.
-11. Confirm the device count through `/api/diagnostics`.
+4. Set `EXPO_PUBLIC_DECISION_GATEWAY_BASE_URL` to the Decision Gateway origin.
+5. From the repository root, run `npm run check:env -- --target=mobile --strict` in a shell where the mobile public variables are exported.
+6. Run `npm run start`.
+7. Open the Expo app on a real device.
+8. Create a Gateway pairing token from a trusted Gateway context.
+9. Enter the Gateway pairing token in the app and tap **Pair with Gateway**.
+10. Tap **Request notification permission**.
+11. Use legacy Attn pairing and device registration only if you are testing the current diagnostic push-token registration path.
 12. Configure Novu and Expo/APNs/FCM credentials.
 13. Trigger a high-priority notification.
 14. Verify real Push receipt only after live credentials and a physical device are available.
 
-## Pairing And Device Registration
+## Gateway Pairing
 
-Create a pairing code from a trusted backend/admin context:
+Create a Gateway pairing token from a trusted Decision Gateway context. Attn mobile exchanges it with the configured Gateway origin and stores only the Gateway-issued mobile session in SecureStore.
+
+The default exchange path in this repository is:
+
+```text
+/api/mobile/pairing/exchange
+```
+
+That path is a placeholder until the Decision Gateway API contract is confirmed. Keep it configurable in code and do not treat it as the production contract without Gateway confirmation.
+
+The pairing request body is:
+
+```json
+{
+  "pairing_token": "...",
+  "device_name": "Attn mobile device",
+  "device_metadata": {
+    "app": "attn-mobile"
+  }
+}
+```
+
+The Gateway response must include a `mobile_session`. The app stores that session through `expo-secure-store`; token values are not displayed in the UI and pairing failures use generic messages.
+
+## Legacy Attn Device Registration
+
+The legacy Attn pairing and device registration path remains available for diagnostics while Gateway becomes the source of truth. It registers an Expo push token with Attn backend endpoints, but it is not the Gateway-owned decision session.
+
+Create a legacy pairing code from a trusted backend/admin context:
 
 ```bash
 curl -X POST http://localhost:3999/api/devices/pairing-codes \
@@ -77,7 +108,7 @@ curl -X POST http://localhost:3999/api/devices/pairing-codes \
   -d '{ "expires_in_minutes": 10, "metadata": { "reason": "mobile setup" } }'
 ```
 
-Enter the returned `pairing_code` in the mobile app and tap **Pair device**. The app exchanges it with:
+Enter the returned `pairing_code` in the legacy Attn pairing field. The app exchanges it with:
 
 ```json
 {
@@ -89,9 +120,9 @@ Enter the returned `pairing_code` in the mobile app and tap **Pair device**. The
 }
 ```
 
-The backend returns a scoped `registration_token`. This shell stores it only in React state for now; closing the app loses it. That is acceptable for the current test shell and should be replaced with secure local storage before production use.
+The backend returns a scoped `registration_token`. The current diagnostic shell stores that token only in React state for register/unregister calls.
 
-After pairing, registration sends:
+After legacy pairing, registration sends:
 
 ```json
 {
@@ -153,22 +184,22 @@ The full Expo runtime path still needs `npm install` and a physical device for m
 
 ## Future Push E2E Checklist
 
-1. Deploy Attn backend.
-2. Run backend migrations.
+1. Deploy Attn backend and configure the Decision Gateway origin.
+2. Run backend migrations if legacy diagnostic registration is needed.
 3. Configure `EXPO_PUBLIC_ATTN_BACKEND_URL`.
-4. Run mobile app on a real device.
-5. Request notification permission.
-6. Create a pairing code from a trusted backend/admin context.
-7. Pair the mobile app.
-8. Register device.
-9. Confirm active device count in diagnostics.
-10. Configure Novu and Expo/APNs/FCM credentials.
-11. Trigger a high-priority decision item.
-12. Confirm delivery records in Attn.
-13. Receive Push.
-14. Tap Push and open the Attn item.
+4. Configure `EXPO_PUBLIC_DECISION_GATEWAY_BASE_URL`.
+5. Run `npm run start`.
+6. Open the Expo app on a real device.
+7. Pair the Gateway session.
+8. Tap **Request notification permission**.
+9. Use legacy device registration only for diagnostic push-token testing.
+10. Confirm diagnostic device count through `/api/diagnostics` when legacy registration is used.
+11. Configure Novu and Expo/APNs/FCM credentials.
+12. Trigger a high-priority notification.
+13. Confirm delivery records in Attn or Gateway diagnostics as appropriate.
+14. Receive Push.
+15. Tap Push and open the Gateway decision page when WebView support lands.
 
-Pairing codes are short-lived. Scoped registration tokens are only accepted by
-device register/unregister endpoints; they are not ingest/admin tokens.
+Gateway pairing tokens are short-lived and must not be logged or stored after exchange. Legacy scoped registration tokens are only accepted by device register/unregister endpoints; they are not ingest/admin tokens.
 
-Do not claim real Push works until steps 10-14 have been verified with live credentials and a real device.
+Do not claim real Push works until live credentials, a real device, Push receipt, tap handling, and Gateway-owned decision execution have been verified.
