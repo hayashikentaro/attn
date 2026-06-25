@@ -19,10 +19,12 @@ npm install
 
 Create a Postgres database and set `DATABASE_URL`. Supabase Postgres works, but plain Postgres is enough.
 
-Run the schema migration in your database:
+Run the schema migrations in your database:
 
 ```bash
-psql "$DATABASE_URL" -f supabase/migrations/20260625000000_create_notifications.sql
+for file in supabase/migrations/*.sql; do
+  psql "$DATABASE_URL" -f "$file"
+done
 ```
 
 Start the app:
@@ -81,6 +83,9 @@ curl -X POST http://localhost:3999/api/notifications \
     "source": "vercel",
     "kind": "error",
     "priority": "high",
+    "external_id": "deployment_123",
+    "dedupe_key": "vercel:deployment_123:production",
+    "schema_version": "1",
     "title": "Production deployment failed",
     "summary": "Build failed during production deployment.",
     "why_it_matters": "Production remains on the previous version.",
@@ -89,10 +94,44 @@ curl -X POST http://localhost:3999/api/notifications \
   }'
 ```
 
-Required fields are `source`, `title`, and `summary`. `kind` defaults to `info`, `priority` defaults to `normal`, `occurred_at` defaults to now, and `payload_json` defaults to `{}`.
+Required fields are `source`, `title`, and `summary`. `kind` defaults to `info`, `priority` defaults to `normal`, `schema_version` defaults to `1`, `occurred_at` defaults to now, and `payload_json` defaults to `{}`.
+
+Use `external_id` when the source system has a stable event or deployment ID. Attn deduplicates `external_id` per `source`.
+
+Use `dedupe_key` when multiple source events should collapse to the same Attn item. Attn treats `dedupe_key` as globally unique.
+
+When an ingest request matches an existing `source + external_id` or `dedupe_key`, Attn does not create another notification. It returns the existing item with `duplicated: true` and records `duplicate_received` in event history.
+
+Ingest request bodies are capped at 64 KB for MVP safety.
+
+Example duplicate response:
+
+```json
+{
+  "notification": {
+    "id": "existing-notification-id"
+  },
+  "duplicated": true
+}
+```
+
+Minimal idempotent ingest:
+
+```bash
+curl -X POST http://localhost:3999/api/notifications \
+  -H "Content-Type: application/json" \
+  -H "x-attn-token: $ATTN_INGEST_TOKEN" \
+  -d '{
+    "source": "vercel",
+    "external_id": "deployment_123",
+    "title": "Production deployment failed",
+    "summary": "Build failed during production deployment."
+  }'
+```
 
 ## API
 
+- `GET /api/health` returns app status and database connectivity without exposing secrets.
 - `POST /api/notifications` creates a notification and records `created`.
 - `GET /api/notifications?bucket=needs_you` lists notifications. Buckets: `needs_you`, `later`, `done`, `all`.
 - `GET /api/notifications/[id]` returns one notification with event history.

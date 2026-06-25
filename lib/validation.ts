@@ -52,6 +52,9 @@ export const jsonObjectSchema = z.record(z.string(), z.unknown());
 
 export const createNotificationInputSchema = z.object({
   source: requiredTrimmedString,
+  external_id: optionalTrimmedString,
+  dedupe_key: optionalTrimmedString,
+  schema_version: requiredTrimmedString.default("1"),
   kind: requiredTrimmedString.default("info"),
   priority: z.enum(notificationPriorityValues).default("normal"),
   title: requiredTrimmedString,
@@ -92,7 +95,7 @@ export const decisionInputSchema = z.object({
   metadata: jsonObjectSchema.default({})
 });
 
-export type CreateNotificationInput = z.infer<
+export type CreateNotificationInput = z.input<
   typeof createNotificationInputSchema
 >;
 export type ListNotificationsQuery = z.infer<typeof listNotificationsQuerySchema>;

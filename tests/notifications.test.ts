@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { getHealthPayload } from "@/app/api/health/route";
 import { isIngestAuthorized } from "@/lib/auth";
 import {
   acknowledgeNotification,
+  coerceJsonObject,
   createNotification,
   getBucketForNotification,
   type IntegrationResult,
@@ -14,6 +16,7 @@ import {
   type NotificationRepository,
   type NotificationWithEvents,
   recordDecision,
+  ingestNotification,
   reopenNotification,
   resolveNotification,
   snoozeNotification,
@@ -28,11 +31,32 @@ class MemoryNotificationRepository implements NotificationRepository {
   notifications: NotificationRecord[] = [];
   events: NotificationEventRecord[] = [];
 
+  async findDuplicateNotification(
+    input: Pick<NormalizedNewNotification, "source" | "external_id" | "dedupe_key">
+  ) {
+    if (!input.external_id && !input.dedupe_key) {
+      return null;
+    }
+
+    return (
+      this.notifications.find(
+        (notification) =>
+          (input.external_id &&
+            notification.source === input.source &&
+            notification.external_id === input.external_id) ||
+          (input.dedupe_key && notification.dedupe_key === input.dedupe_key)
+      ) ?? null
+    );
+  }
+
   async createNotification(input: NormalizedNewNotification) {
     const now = new Date().toISOString();
     const notification: NotificationRecord = {
       id: randomUUID(),
       source: input.source,
+      external_id: input.external_id ?? null,
+      dedupe_key: input.dedupe_key ?? null,
+      schema_version: input.schema_version,
       kind: input.kind,
       priority: input.priority,
       status: input.status,
@@ -188,6 +212,7 @@ describe("notifications", () => {
     });
 
     expect(notification.title).toBe("Production deployment failed");
+    expect(notification.schema_version).toBe("1");
     expect(repository.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -197,6 +222,110 @@ describe("notifications", () => {
         })
       ])
     );
+  });
+
+  it("coerces JSON strings returned by the database into objects", () => {
+    expect(coerceJsonObject('{"check":"idempotency"}')).toEqual({
+      check: "idempotency"
+    });
+    expect(coerceJsonObject({ already: "object" })).toEqual({
+      already: "object"
+    });
+    expect(coerceJsonObject("not json")).toEqual({});
+    expect(coerceJsonObject(["not", "an", "object"])).toEqual({});
+  });
+
+  it("creates a notification with external_id and schema_version", async () => {
+    const repository = new MemoryNotificationRepository();
+
+    const result = await ingestNotification(
+      input({
+        external_id: "deployment-123",
+        schema_version: "2"
+      }),
+      {
+        repository,
+        sendSlack: skipped,
+        sendNovu: skipped
+      }
+    );
+
+    expect(result.duplicated).toBe(false);
+    expect(result.notification.external_id).toBe("deployment-123");
+    expect(result.notification.schema_version).toBe("2");
+    expect(repository.notifications).toHaveLength(1);
+  });
+
+  it("does not create another notification for duplicate source and external_id", async () => {
+    const repository = new MemoryNotificationRepository();
+
+    const first = await ingestNotification(
+      input({ external_id: "deployment-123" }),
+      {
+        repository,
+        sendSlack: skipped,
+        sendNovu: skipped
+      }
+    );
+    const duplicate = await ingestNotification(
+      input({
+        external_id: "deployment-123",
+        title: "Retried deployment payload"
+      }),
+      {
+        repository,
+        sendSlack: skipped,
+        sendNovu: skipped
+      }
+    );
+
+    expect(duplicate.duplicated).toBe(true);
+    expect(duplicate.notification.id).toBe(first.notification.id);
+    expect(repository.notifications).toHaveLength(1);
+    expect(repository.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          notification_id: first.notification.id,
+          event_type: "duplicate_received",
+          actor: "api"
+        })
+      ])
+    );
+  });
+
+  it("does not create another notification for duplicate dedupe_key", async () => {
+    const repository = new MemoryNotificationRepository();
+
+    const first = await ingestNotification(
+      input({ source: "vercel", dedupe_key: "global-dedupe-key" }),
+      {
+        repository,
+        sendSlack: skipped,
+        sendNovu: skipped
+      }
+    );
+    const duplicate = await ingestNotification(
+      input({
+        source: "agent",
+        dedupe_key: "global-dedupe-key",
+        title: "Same incident from another source"
+      }),
+      {
+        repository,
+        sendSlack: skipped,
+        sendNovu: skipped
+      }
+    );
+
+    expect(duplicate.duplicated).toBe(true);
+    expect(duplicate.notification.id).toBe(first.notification.id);
+    expect(repository.notifications).toHaveLength(1);
+    expect(repository.events.at(-1)).toMatchObject({
+      event_type: "duplicate_received",
+      metadata_json: expect.objectContaining({
+        dedupe_key: "global-dedupe-key"
+      })
+    });
   });
 
   it("requires the ingest token when configured", () => {
@@ -340,6 +469,32 @@ describe("notifications", () => {
       metadata_json: {
         comment: "Looks good",
         metadata: { runId: "run-1" }
+      }
+    });
+  });
+
+  it("returns safe health payloads", async () => {
+    const now = () => new Date("2026-06-25T12:00:00.000Z");
+
+    await expect(getHealthPayload(async () => undefined, now)).resolves.toEqual({
+      app: "attn",
+      status: "ok",
+      checked_at: "2026-06-25T12:00:00.000Z",
+      database: {
+        ok: true
+      }
+    });
+
+    await expect(
+      getHealthPayload(async () => {
+        throw new Error("contains no secret details in payload");
+      }, now)
+    ).resolves.toEqual({
+      app: "attn",
+      status: "degraded",
+      checked_at: "2026-06-25T12:00:00.000Z",
+      database: {
+        ok: false
       }
     });
   });

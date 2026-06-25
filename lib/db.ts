@@ -18,3 +18,7 @@ export function getSql() {
 
   return sql;
 }
+
+export async function checkDatabaseConnection() {
+  await getSql()`select 1`;
+}
