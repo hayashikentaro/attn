@@ -37,6 +37,9 @@ export function DeliveryHistory({
             <p className="mt-2 text-sm text-zinc-600">
               Attempts: {delivery.attempts}
               {delivery.last_error ? ` / ${delivery.last_error}` : ""}
+              {delivery.sent_at
+                ? ` / sent ${formatAbsoluteDateTime(delivery.sent_at)}`
+                : ""}
             </p>
             {Object.keys(delivery.metadata_json).length > 0 ? (
               <details className="mt-3">

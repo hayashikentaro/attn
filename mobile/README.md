@@ -49,6 +49,21 @@ npm run start
 
 Run on a real iOS or Android device for push-token testing. Simulators may not provide usable push tokens.
 
+For first-device setup:
+
+1. Start or deploy the Attn backend.
+2. Apply backend migrations with `npm run migrate`.
+3. Set `EXPO_PUBLIC_ATTN_BACKEND_URL` to a URL the device can reach.
+4. Run `npm run start`.
+5. Open the Expo app on a real device.
+6. Create a pairing code from a trusted backend/admin shell.
+7. Enter the pairing code in the app and tap **Pair device**.
+8. Tap **Request notification permission**.
+9. Tap **Register device**.
+10. Confirm the device count through `/api/diagnostics`.
+11. Trigger a high-priority notification.
+12. Later, after Novu and provider credentials exist, verify real Push receipt.
+
 ## Pairing And Device Registration
 
 Create a pairing code from a trusted backend/admin context:
@@ -137,16 +152,21 @@ The full Expo runtime path still needs `npm install` and a physical device for m
 ## Future Push E2E Checklist
 
 1. Deploy Attn backend.
-2. Configure backend URL in the mobile app.
-3. Run mobile app on a real device.
-4. Request notification permission.
-5. Create a pairing code from a trusted backend/admin context.
-6. Pair the mobile app.
-7. Register device.
-8. Confirm the device row in the backend.
-9. Configure Novu and Expo/APNs/FCM credentials.
-10. Trigger a high-priority decision item.
-11. Receive Push.
-12. Tap Push and open the Attn item.
+2. Run backend migrations.
+3. Configure `EXPO_PUBLIC_ATTN_BACKEND_URL`.
+4. Run mobile app on a real device.
+5. Request notification permission.
+6. Create a pairing code from a trusted backend/admin context.
+7. Pair the mobile app.
+8. Register device.
+9. Confirm active device count in diagnostics.
+10. Configure Novu and Expo/APNs/FCM credentials.
+11. Trigger a high-priority decision item.
+12. Confirm delivery records in Attn.
+13. Receive Push.
+14. Tap Push and open the Attn item.
 
-Do not claim real Push works until steps 9-12 have been verified with live credentials and a real device.
+Pairing codes are short-lived. Scoped registration tokens are only accepted by
+device register/unregister endpoints; they are not ingest/admin tokens.
+
+Do not claim real Push works until steps 10-14 have been verified with live credentials and a real device.

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { getHealthPayload } from "@/app/api/health/route";
 import { POST as postNotification } from "@/app/api/notifications/route";
 import { isIngestAuthorized } from "@/lib/auth";
+import { getDiagnosticsPayload } from "@/lib/diagnostics";
 import {
   createDevicePairingCode,
   exchangeDevicePairingCode,
@@ -23,6 +24,7 @@ import {
   type DeviceRecord,
   type DeviceRepository
 } from "@/lib/devices";
+import { sendNovuNotification } from "@/lib/novu";
 import {
   resolveTargetSubscriber,
   type SubscriberRecord,
@@ -60,6 +62,13 @@ import {
   createNotificationInputSchema,
   formatValidationError
 } from "@/lib/validation";
+import {
+  buildPairPayload,
+  buildRegisterDevicePayload as buildSmokeRegisterDevicePayload,
+  buildSmokeNotificationPayload,
+  buildUnregisterDevicePayload,
+  fakeExpoToken
+} from "@/scripts/smoke-helpers";
 
 class MemoryNotificationRepository implements NotificationRepository {
   notifications: NotificationRecord[] = [];
@@ -149,6 +158,7 @@ class MemoryNotificationRepository implements NotificationRepository {
       attempts: input.attempts ?? 0,
       last_error: input.last_error ?? null,
       metadata_json: input.metadata_json ?? {},
+      sent_at: input.sent_at ?? (input.status === "sent" ? now : null),
       created_at: now,
       updated_at: now
     };
@@ -167,6 +177,7 @@ class MemoryNotificationRepository implements NotificationRepository {
     delivery.attempts = input.attempts;
     delivery.last_error = input.last_error ?? null;
     delivery.metadata_json = input.metadata_json ?? {};
+    delivery.sent_at = input.sent_at ?? (input.status === "sent" ? new Date().toISOString() : null);
     delivery.updated_at = new Date().toISOString();
 
     return delivery;
@@ -1290,5 +1301,163 @@ describe("notifications", () => {
     });
 
     expect(revoked?.revoked_at).toBe("2026-06-25T12:05:00.000Z");
+  });
+
+  it("returns safe diagnostics without exposing secrets", async () => {
+    const payload = await getDiagnosticsPayload({
+      env: {
+        NODE_ENV: "test",
+        DATABASE_URL: "postgres://secret-user:secret-pass@example.test/db",
+        ATTN_INGEST_TOKEN: "server-secret",
+        APP_BASE_URL: "https://attn.example.com",
+        NEXT_PUBLIC_APP_BASE_URL: "https://attn.example.com",
+        SLACK_WEBHOOK_URL: "https://hooks.slack.example/secret",
+        NOVU_SECRET_KEY: "novu-secret",
+        NOVU_WORKFLOW_ID: "workflow-id",
+        ATTN_DEFAULT_SUBSCRIBER_EXTERNAL_ID: "attn-operator"
+      } as NodeJS.ProcessEnv,
+      now: () => new Date("2026-06-25T12:00:00.000Z"),
+      checks: {
+        checkDatabase: async () => undefined,
+        defaultSubscriberExists: async () => true,
+        activeDeviceCount: async () => 2,
+        recentDeliveryCounts: async () => ({
+          sent: 3,
+          skipped: 4
+        })
+      }
+    });
+
+    expect(payload).toEqual({
+      ok: true,
+      timestamp: "2026-06-25T12:00:00.000Z",
+      database: "ok",
+      config: {
+        app_base_url: true,
+        next_public_app_base_url: true,
+        slack_configured: true,
+        novu_configured: true,
+        novu_dry_run: false
+      },
+      default_subscriber: {
+        external_id: "attn-operator",
+        exists: true
+      },
+      devices: {
+        active_count: 2
+      },
+      deliveries: {
+        recent_by_status: {
+          sent: 3,
+          skipped: 4
+        }
+      }
+    });
+    expect(JSON.stringify(payload)).not.toContain("server-secret");
+    expect(JSON.stringify(payload)).not.toContain("novu-secret");
+    expect(JSON.stringify(payload)).not.toContain("secret-pass");
+  });
+
+  it("supports deterministic Novu dry-run responses", async () => {
+    const result = await sendNovuNotification(
+      {
+        ...input(),
+        id: randomUUID(),
+        source: "vercel",
+        external_id: null,
+        dedupe_key: null,
+        schema_version: "1",
+        kind: "error",
+        priority: "high",
+        status: "new",
+        title: "Production deployment failed",
+        summary: "Build failed during production deployment.",
+        detail: null,
+        why_it_matters: null,
+        suggested_action: null,
+        source_url: null,
+        related_run_id: null,
+        related_task_id: null,
+        payload_json: {},
+        snoozed_until: null,
+        occurred_at: "2026-06-25T12:00:00.000Z",
+        created_at: "2026-06-25T12:00:00.000Z",
+        updated_at: "2026-06-25T12:00:00.000Z"
+      },
+      {
+        NODE_ENV: "test",
+        NOVU_DRY_RUN: "true",
+        NOVU_SECRET_KEY: "unused-secret",
+        NOVU_WORKFLOW_ID: "workflow-id",
+        NOVU_SUBSCRIBER_ID: "novu-human",
+        APP_BASE_URL: "https://attn.example.com"
+      } as NodeJS.ProcessEnv
+    );
+
+    expect(result).toEqual({
+      status: "skipped",
+      metadata: {
+        reason: "novu_dry_run",
+        subscriberId: "novu-human",
+        workflowId: "workflow-id"
+      }
+    });
+  });
+
+  it("marks sent deliveries with sent_at", async () => {
+    const repository = new MemoryNotificationRepository();
+
+    await ingestNotification(input(), {
+      repository,
+      env: {
+        ...process.env,
+        SLACK_WEBHOOK_URL: "https://slack.example.test/webhook"
+      },
+      sendSlack: async () => ({ status: "sent", metadata: { status: 200 } }),
+      sendNovu: skipped
+    });
+
+    expect(repository.deliveries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          channel: "in_app",
+          status: "sent",
+          sent_at: expect.any(String)
+        }),
+        expect.objectContaining({
+          channel: "slack",
+          status: "sent",
+          sent_at: expect.any(String)
+        })
+      ])
+    );
+  });
+
+  it("builds smoke payloads with only fake device tokens", () => {
+    expect(buildSmokeNotificationPayload("abc")).toMatchObject({
+      source: "smoke",
+      external_id: "abc",
+      dedupe_key: "smoke:abc"
+    });
+    expect(buildPairPayload("ABCD-EFGH")).toEqual({
+      pairing_code: "ABCD-EFGH",
+      device_name: "Smoke test device",
+      metadata: {
+        source: "smoke:e2e"
+      }
+    });
+    expect(buildSmokeRegisterDevicePayload()).toEqual({
+      platform: "expo",
+      provider: "expo",
+      device_token: fakeExpoToken,
+      device_name: "Smoke test device",
+      metadata: {
+        source: "smoke:e2e"
+      }
+    });
+    expect(buildUnregisterDevicePayload()).toEqual({
+      provider: "expo",
+      device_token: fakeExpoToken
+    });
   });
 });

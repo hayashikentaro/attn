@@ -49,12 +49,27 @@ export async function sendNovuNotification(
 ): Promise<IntegrationResult> {
   const secretKey = env.NOVU_SECRET_KEY;
   const workflowId = env.NOVU_WORKFLOW_ID;
+  const payload = buildNovuNotificationPayload(notification, env);
 
-  if (!secretKey || !workflowId) {
-    return { status: "skipped" };
+  if (env.NOVU_DRY_RUN === "true") {
+    return {
+      status: "skipped",
+      metadata: {
+        reason: "novu_dry_run",
+        subscriberId: payload.subscriberId,
+        workflowId: workflowId || null
+      }
+    };
   }
 
-  const payload = buildNovuNotificationPayload(notification, env);
+  if (!secretKey || !workflowId) {
+    return {
+      status: "skipped",
+      metadata: {
+        reason: "novu_not_configured"
+      }
+    };
+  }
 
   try {
     const response = await fetch("https://api.novu.co/v1/events/trigger", {

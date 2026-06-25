@@ -75,6 +75,7 @@ export interface NotificationDeliveryRecord {
   attempts: number;
   last_error: string | null;
   metadata_json: JsonObject;
+  sent_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -120,6 +121,7 @@ export interface NotificationDeliveryInput {
   attempts?: number;
   last_error?: string | null;
   metadata_json?: JsonObject;
+  sent_at?: string | null;
 }
 
 export interface NotificationDeliveryUpdateInput {
@@ -127,6 +129,7 @@ export interface NotificationDeliveryUpdateInput {
   attempts: number;
   last_error?: string | null;
   metadata_json?: JsonObject;
+  sent_at?: string | null;
 }
 
 export interface NotificationRepository {
@@ -193,9 +196,10 @@ type DbNotificationEventRow = Omit<
 
 type DbNotificationDeliveryRow = Omit<
   NotificationDeliveryRecord,
-  "created_at" | "updated_at" | "metadata_json"
+  "created_at" | "updated_at" | "sent_at" | "metadata_json"
 > & {
   metadata_json: JsonObject | string | null;
+  sent_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
 };
@@ -255,6 +259,7 @@ function serializeDelivery(row: DbNotificationDeliveryRow): NotificationDelivery
   return {
     ...row,
     metadata_json: coerceJsonObject(row.metadata_json),
+    sent_at: row.sent_at ? toIso(row.sent_at) : null,
     created_at: toIso(row.created_at),
     updated_at: toIso(row.updated_at)
   };
@@ -463,6 +468,7 @@ export function getPostgresNotificationRepository(): NotificationRepository {
           status,
           attempts,
           last_error,
+          sent_at,
           metadata_json
         )
         values (
@@ -472,6 +478,7 @@ export function getPostgresNotificationRepository(): NotificationRepository {
           ${input.status},
           ${input.attempts ?? 0},
           ${input.last_error ?? null},
+          ${input.sent_at ?? (input.status === "sent" ? new Date().toISOString() : null)},
           ${JSON.stringify(input.metadata_json ?? {})}::jsonb
         )
         returning *
@@ -487,6 +494,7 @@ export function getPostgresNotificationRepository(): NotificationRepository {
         set status = ${input.status},
             attempts = ${input.attempts},
             last_error = ${input.last_error ?? null},
+            sent_at = ${input.sent_at ?? (input.status === "sent" ? new Date().toISOString() : null)},
             metadata_json = ${JSON.stringify(input.metadata_json ?? {})}::jsonb
         where id = ${id}
         returning *
@@ -691,7 +699,7 @@ function isSlackConfigured(options: NotificationServiceOptions) {
 
 function isNovuConfigured(options: NotificationServiceOptions) {
   const env = options.env ?? process.env;
-  return Boolean(env.NOVU_SECRET_KEY && env.NOVU_WORKFLOW_ID);
+  return env.NOVU_DRY_RUN === "true" || Boolean(env.NOVU_SECRET_KEY && env.NOVU_WORKFLOW_ID);
 }
 
 interface DeliveryRoute {
@@ -729,7 +737,12 @@ function getExternalDeliveryRoutes(
       channel: "novu",
       provider: "novu",
       shouldAttempt: isNovuConfigured(options),
-      reason: isNovuConfigured(options) ? "configured_route" : "novu_not_configured"
+      reason:
+        (options.env ?? process.env).NOVU_DRY_RUN === "true"
+          ? "novu_dry_run"
+          : isNovuConfigured(options)
+            ? "configured_route"
+            : "novu_not_configured"
     });
   }
 

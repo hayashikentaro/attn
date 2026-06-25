@@ -22,9 +22,7 @@ Create a Postgres database and set `DATABASE_URL`. Supabase Postgres works, but 
 Run the schema migrations in your database:
 
 ```bash
-for file in supabase/migrations/*.sql; do
-  psql "$DATABASE_URL" -f "$file"
-done
+npm run migrate
 ```
 
 Start the app:
@@ -37,28 +35,46 @@ Open `http://localhost:3999/queue`.
 
 The minimal future-Push mobile shell lives in `mobile/`. It is isolated from the web app and documented in `mobile/README.md`.
 
+For deployed environments, run the same command from a trusted shell that has
+`DATABASE_URL` pointed at the deployed database. The migration script applies
+the SQL files in `supabase/migrations/` with `psql`; it does not reset data.
+
 ## Environment Variables
 
-Core:
+Server-only secrets:
 
 ```env
 DATABASE_URL=
-NEXT_PUBLIC_APP_BASE_URL=
-APP_BASE_URL=
 ATTN_INGEST_TOKEN=
 ```
 
-Optional fan-out:
+Server/public URL:
+
+```env
+APP_BASE_URL=
+NEXT_PUBLIC_APP_BASE_URL=
+```
+
+Optional server integrations:
 
 ```env
 SLACK_WEBHOOK_URL=
 NOVU_SECRET_KEY=
 NOVU_WORKFLOW_ID=
+NOVU_DRY_RUN=
 NOVU_SUBSCRIBER_ID=
 ATTN_DEFAULT_SUBSCRIBER_EXTERNAL_ID=
 ```
 
-Only `DATABASE_URL` is required for core functionality.
+Mobile public variables, configured under `mobile/`:
+
+```env
+EXPO_PUBLIC_ATTN_BACKEND_URL=
+EXPO_PUBLIC_ATTN_TEST_ITEM_URL=
+EXPO_PUBLIC_EXPO_PROJECT_ID=
+```
+
+Only `DATABASE_URL` is required for core local functionality.
 
 If `ATTN_INGEST_TOKEN` is set, ingestion requires either:
 
@@ -71,6 +87,9 @@ Do not put `ATTN_INGEST_TOKEN` in the mobile app or any `EXPO_PUBLIC_*`
 variable. Expo public variables are bundled into the client. Mobile device
 registration uses short-lived pairing codes and scoped device registration
 tokens instead.
+
+Set `NOVU_DRY_RUN=true` when you want deterministic delivery bookkeeping
+without calling Novu, even if Novu credentials are present.
 
 ## Create Demo Data
 
@@ -177,6 +196,14 @@ Health check:
 curl http://localhost:3999/api/health
 ```
 
+Diagnostics check. This is protected by `ATTN_INGEST_TOKEN` and only reports
+safe booleans/counts:
+
+```bash
+curl http://localhost:3999/api/diagnostics \
+  -H "Authorization: Bearer $ATTN_INGEST_TOKEN"
+```
+
 Create a short-lived device pairing code. This is an admin/server action and
 requires `ATTN_INGEST_TOKEN`:
 
@@ -241,6 +268,7 @@ clients should not use that path.
 ## API
 
 - `GET /api/health` returns app status and database connectivity without exposing secrets.
+- `GET /api/diagnostics` returns protected, safe deployment diagnostics without exposing secrets.
 - `POST /api/notifications` creates a notification and records `created`.
 - `GET /api/notifications?bucket=needs_you` lists notifications. Buckets: `needs_you`, `later`, `done`, `all`.
 - `GET /api/notifications/[id]` returns one notification with event history.
@@ -279,7 +307,7 @@ Routing is code-defined for now:
 - `decision_request` and `checkpoint` items create the Attn item, route to Novu when configured, and route to Slack when configured so the Slack message can point back to Attn.
 - `normal` and `low` priority items stay in Attn only.
 
-When a high/critical/checkpoint route wants Slack or Novu but the provider is not configured, Attn records a skipped delivery row with a reason such as `slack_not_configured` or `novu_not_configured`. Delivery rows track `channel`, `provider`, `status`, `attempts`, `last_error`, and non-secret metadata. Slack and Novu failures do not fail notification creation; Attn stores the notification, records the failed delivery state, and keeps the item in the queue.
+When a high/critical/checkpoint route wants Slack or Novu but the provider is not configured, Attn records a skipped delivery row with a reason such as `slack_not_configured` or `novu_not_configured`. Delivery rows track `channel`, `provider`, `status`, `attempts`, `last_error`, `sent_at`, timestamps, and non-secret metadata. The item detail API and page expose these fields for debugging without making the queue noisy. Slack and Novu failures do not fail notification creation; Attn stores the notification, records the failed delivery state, and keeps the item in the queue.
 
 ## Subscribers And Devices
 
@@ -323,7 +351,36 @@ Slack failures do not fail notification creation. Attn records `slack_sent` or `
 
 Novu is optional. If `NOVU_SECRET_KEY` and `NOVU_WORKFLOW_ID` are set, Attn makes a best-effort call to Novu's event trigger API and records `novu_sent` or `novu_failed`. The adapter receives the subscriber id, notification item id, title, summary, priority, item URL, and payload.
 
+If `NOVU_DRY_RUN=true`, Attn does not call Novu. It records a skipped delivery
+with dry-run metadata so routing and smoke tests stay deterministic.
+
 This is intentionally isolated in `lib/novu.ts`; the app works without Novu configured.
+
+## Deployment Smoke Tests
+
+The local smoke script verifies the core backend flow without real external
+services or Push credentials. It requires a running app, migrated database, and
+an ingest/admin token:
+
+```bash
+ATTN_BASE_URL=http://localhost:3999 \
+ATTN_INGEST_TOKEN=dev-token \
+npm run smoke:e2e
+```
+
+The script checks:
+
+- `GET /api/health`
+- idempotent ingest with `external_id` and `duplicated: true`
+- pairing code creation and exchange
+- fake Expo token registration/unregistration
+- high-priority delivery bookkeeping
+- protected diagnostics
+
+Use fake tokens only, such as `ExponentPushToken[fake-smoke-token]`. The smoke
+script does not send real Push and does not require Novu, Expo, APNs, or FCM.
+
+For the first live Push verification runbook, see `docs/push-e2e.md`.
 
 ## Verification
 

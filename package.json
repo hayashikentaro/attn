@@ -9,7 +9,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
-    "seed": "tsx scripts/seed-notifications.ts"
+    "migrate": "sh -c 'for file in supabase/migrations/*.sql; do psql \"$DATABASE_URL\" -f \"$file\"; done'",
+    "seed": "tsx scripts/seed-notifications.ts",
+    "smoke:e2e": "tsx scripts/smoke-e2e.ts"
   },
   "dependencies": {
     "@tailwindcss/postcss": "4.3.1",
