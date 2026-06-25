@@ -46,6 +46,7 @@ Server-only secrets:
 ```env
 DATABASE_URL=
 ATTN_INGEST_TOKEN=
+DECISION_GATEWAY_API_TOKEN=
 ```
 
 Server/public URL:
@@ -53,6 +54,12 @@ Server/public URL:
 ```env
 APP_BASE_URL=
 NEXT_PUBLIC_APP_BASE_URL=
+```
+
+Decision Gateway server configuration:
+
+```env
+DECISION_GATEWAY_BASE_URL=
 ```
 
 Optional server integrations:
@@ -75,6 +82,11 @@ EXPO_PUBLIC_EXPO_PROJECT_ID=
 ```
 
 Only `DATABASE_URL` is required for core local functionality.
+
+`DECISION_GATEWAY_BASE_URL` points server-side Gateway client calls at the
+Decision Gateway origin. Set `DECISION_GATEWAY_API_TOKEN` only when the Gateway
+requires bearer authentication; it is server-only and must not be bundled into
+mobile code.
 
 If `ATTN_INGEST_TOKEN` is set, ingestion requires either:
 
