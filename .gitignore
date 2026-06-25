@@ -1,4 +1,9 @@
 .DS_Store
+node_modules/
+.next/
+out/
+coverage/
+tsconfig.tsbuildinfo
 
 # Local AI/runtime state
 .taskdeck/
