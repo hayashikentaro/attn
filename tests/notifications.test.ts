@@ -1,7 +1,21 @@
 import { randomUUID } from "node:crypto";
+import { NextRequest } from "next/server";
 import { describe, expect, it } from "vitest";
 import { getHealthPayload } from "@/app/api/health/route";
+import { POST as postNotification } from "@/app/api/notifications/route";
 import { isIngestAuthorized } from "@/lib/auth";
+import {
+  hashDeviceToken,
+  registerDevice,
+  redactDevice,
+  type DeviceRecord,
+  type DeviceRepository
+} from "@/lib/devices";
+import {
+  resolveTargetSubscriber,
+  type SubscriberRecord,
+  type SubscriberRepository
+} from "@/lib/subscribers";
 import {
   acknowledgeNotification,
   coerceJsonObject,
@@ -12,6 +26,9 @@ import {
   type NormalizedNewNotification,
   type NotificationEventInput,
   type NotificationEventRecord,
+  type NotificationDeliveryInput,
+  type NotificationDeliveryRecord,
+  type NotificationDeliveryUpdateInput,
   type NotificationRecord,
   type NotificationRepository,
   type NotificationWithEvents,
@@ -23,13 +40,19 @@ import {
   sortNotificationsForBucket
 } from "@/lib/notifications";
 import type {
+  DeviceProvider,
   ListNotificationsQuery,
   NotificationStatus
+} from "@/lib/validation";
+import {
+  createNotificationInputSchema,
+  formatValidationError
 } from "@/lib/validation";
 
 class MemoryNotificationRepository implements NotificationRepository {
   notifications: NotificationRecord[] = [];
   events: NotificationEventRecord[] = [];
+  deliveries: NotificationDeliveryRecord[] = [];
 
   async findDuplicateNotification(
     input: Pick<NormalizedNewNotification, "source" | "external_id" | "dedupe_key">
@@ -103,6 +126,40 @@ class MemoryNotificationRepository implements NotificationRepository {
     return event;
   }
 
+  async createDelivery(input: NotificationDeliveryInput) {
+    const now = new Date().toISOString();
+    const delivery: NotificationDeliveryRecord = {
+      id: randomUUID(),
+      notification_id: input.notification_id,
+      channel: input.channel,
+      provider: input.provider,
+      status: input.status,
+      attempts: input.attempts ?? 0,
+      last_error: input.last_error ?? null,
+      metadata_json: input.metadata_json ?? {},
+      created_at: now,
+      updated_at: now
+    };
+
+    this.deliveries.push(delivery);
+    return delivery;
+  }
+
+  async updateDelivery(id: string, input: NotificationDeliveryUpdateInput) {
+    const delivery = this.deliveries.find((item) => item.id === id);
+    if (!delivery) {
+      return null;
+    }
+
+    delivery.status = input.status;
+    delivery.attempts = input.attempts;
+    delivery.last_error = input.last_error ?? null;
+    delivery.metadata_json = input.metadata_json ?? {};
+    delivery.updated_at = new Date().toISOString();
+
+    return delivery;
+  }
+
   async updateStatusWithEvent(
     id: string,
     status: NotificationStatus,
@@ -135,7 +192,10 @@ class MemoryNotificationRepository implements NotificationRepository {
 
     return {
       ...notification,
-      events: this.events.filter((event) => event.notification_id === id)
+      events: this.events.filter((event) => event.notification_id === id),
+      deliveries: this.deliveries.filter(
+        (delivery) => delivery.notification_id === id
+      )
     };
   }
 
@@ -179,6 +239,120 @@ class MemoryNotificationRepository implements NotificationRepository {
   }
 }
 
+class MemorySubscriberRepository implements SubscriberRepository {
+  subscribers: SubscriberRecord[] = [];
+
+  async findSubscriber(id: string) {
+    return this.subscribers.find((subscriber) => subscriber.id === id) ?? null;
+  }
+
+  async findByExternalId(externalId: string) {
+    return (
+      this.subscribers.find(
+        (subscriber) => subscriber.external_id === externalId
+      ) ?? null
+    );
+  }
+
+  async ensureDefaultSubscriber(input?: {
+    external_id?: string;
+    display_name?: string;
+    email?: string;
+    novu_subscriber_id?: string;
+  }) {
+    const externalId = input?.external_id ?? "attn-operator";
+    const existing = await this.findByExternalId(externalId);
+    if (existing) {
+      return existing;
+    }
+
+    const now = new Date().toISOString();
+    const subscriber: SubscriberRecord = {
+      id: randomUUID(),
+      external_id: externalId,
+      display_name: input?.display_name ?? "Default Attn operator",
+      email: input?.email ?? null,
+      novu_subscriber_id: input?.novu_subscriber_id ?? externalId,
+      created_at: now,
+      updated_at: now
+    };
+
+    this.subscribers.push(subscriber);
+    return subscriber;
+  }
+}
+
+class MemoryDeviceRepository implements DeviceRepository {
+  devices: DeviceRecord[] = [];
+
+  async upsertDevice(input: {
+    subscriber_id: string;
+    platform: DeviceRecord["platform"];
+    provider: DeviceProvider;
+    device_token_hash: string;
+    device_name?: string;
+    metadata_json?: JsonObject;
+    last_seen_at: string;
+  }) {
+    const existing = this.devices.find(
+      (device) =>
+        device.subscriber_id === input.subscriber_id &&
+        device.provider === input.provider &&
+        device.device_token_hash === input.device_token_hash
+    );
+
+    if (existing) {
+      existing.platform = input.platform;
+      existing.device_name = input.device_name ?? null;
+      existing.metadata_json = input.metadata_json ?? {};
+      existing.last_seen_at = input.last_seen_at;
+      existing.revoked_at = null;
+      existing.updated_at = input.last_seen_at;
+      return existing;
+    }
+
+    const device: DeviceRecord = {
+      id: randomUUID(),
+      subscriber_id: input.subscriber_id,
+      platform: input.platform,
+      provider: input.provider,
+      device_token_hash: input.device_token_hash,
+      device_name: input.device_name ?? null,
+      last_seen_at: input.last_seen_at,
+      revoked_at: null,
+      metadata_json: input.metadata_json ?? {},
+      created_at: input.last_seen_at,
+      updated_at: input.last_seen_at
+    };
+
+    this.devices.push(device);
+    return device;
+  }
+
+  async revokeDevice(input: {
+    device_id?: string;
+    provider?: DeviceProvider;
+    device_token_hash?: string;
+    revoked_at: string;
+  }) {
+    const device = input.device_id
+      ? this.devices.find((item) => item.id === input.device_id)
+      : this.devices.find(
+          (item) =>
+            item.provider === input.provider &&
+            item.device_token_hash === input.device_token_hash
+        );
+
+    if (!device) {
+      return null;
+    }
+
+    device.revoked_at = input.revoked_at;
+    device.updated_at = input.revoked_at;
+    return device;
+  }
+}
+
 const skipped = async (): Promise<IntegrationResult> => ({ status: "skipped" });
 
 function input(overrides: Partial<Parameters<typeof createNotification>[0]> = {}) {
@@ -213,6 +387,17 @@ describe("notifications", () => {
 
     expect(notification.title).toBe("Production deployment failed");
     expect(notification.schema_version).toBe("1");
+    expect(repository.deliveries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          notification_id: notification.id,
+          channel: "in_app",
+          provider: "none",
+          status: "sent",
+          attempts: 1
+        })
+      ])
+    );
     expect(repository.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -256,6 +441,83 @@ describe("notifications", () => {
     expect(repository.notifications).toHaveLength(1);
   });
 
+  it("defaults schema_version to 1 and reports invalid payloads cleanly", () => {
+    const parsed = createNotificationInputSchema.safeParse({
+      source: "agent",
+      title: "Checkpoint needs approval",
+      summary: "A decision is waiting."
+    });
+
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.schema_version).toBe("1");
+    }
+
+    const invalid = createNotificationInputSchema.safeParse({
+      source: "agent",
+      summary: "Missing title"
+    });
+    expect(invalid.success).toBe(false);
+    if (!invalid.success) {
+      expect(formatValidationError(invalid.error)).toEqual(
+        expect.objectContaining({
+          error: "Validation failed",
+          issues: expect.arrayContaining([
+            expect.objectContaining({
+              path: "title"
+            })
+          ])
+        })
+      );
+    }
+  });
+
+  it("returns clean 400 responses for invalid ingest requests", async () => {
+    const originalToken = process.env.ATTN_INGEST_TOKEN;
+    delete process.env.ATTN_INGEST_TOKEN;
+
+    try {
+      const invalidJson = await postNotification(
+        new NextRequest("http://localhost:3999/api/notifications", {
+          method: "POST",
+          body: "{",
+          headers: {
+            "content-type": "application/json"
+          }
+        })
+      );
+      expect(invalidJson.status).toBe(400);
+      await expect(invalidJson.json()).resolves.toEqual({
+        error: "Invalid JSON body"
+      });
+
+      const invalidPayload = await postNotification(
+        new NextRequest("http://localhost:3999/api/notifications", {
+          method: "POST",
+          body: JSON.stringify({
+            source: "agent",
+            summary: "Missing title"
+          }),
+          headers: {
+            "content-type": "application/json"
+          }
+        })
+      );
+      expect(invalidPayload.status).toBe(400);
+      await expect(invalidPayload.json()).resolves.toEqual(
+        expect.objectContaining({
+          error: "Validation failed"
+        })
+      );
+    } finally {
+      if (originalToken === undefined) {
+        delete process.env.ATTN_INGEST_TOKEN;
+      } else {
+        process.env.ATTN_INGEST_TOKEN = originalToken;
+      }
+    }
+  });
+
   it("does not create another notification for duplicate source and external_id", async () => {
     const repository = new MemoryNotificationRepository();
 
@@ -267,6 +529,7 @@ describe("notifications", () => {
         sendNovu: skipped
       }
     );
+    const firstDeliveryCount = repository.deliveries.length;
     const duplicate = await ingestNotification(
       input({
         external_id: "deployment-123",
@@ -282,6 +545,7 @@ describe("notifications", () => {
     expect(duplicate.duplicated).toBe(true);
     expect(duplicate.notification.id).toBe(first.notification.id);
     expect(repository.notifications).toHaveLength(1);
+    expect(repository.deliveries).toHaveLength(firstDeliveryCount);
     expect(repository.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -304,6 +568,7 @@ describe("notifications", () => {
         sendNovu: skipped
       }
     );
+    const firstDeliveryCount = repository.deliveries.length;
     const duplicate = await ingestNotification(
       input({
         source: "agent",
@@ -320,12 +585,161 @@ describe("notifications", () => {
     expect(duplicate.duplicated).toBe(true);
     expect(duplicate.notification.id).toBe(first.notification.id);
     expect(repository.notifications).toHaveLength(1);
+    expect(repository.deliveries).toHaveLength(firstDeliveryCount);
     expect(repository.events.at(-1)).toMatchObject({
       event_type: "duplicate_received",
       metadata_json: expect.objectContaining({
         dedupe_key: "global-dedupe-key"
       })
     });
+  });
+
+  it("creates delivery rows for configured high-priority routes", async () => {
+    const repository = new MemoryNotificationRepository();
+
+    const result = await ingestNotification(input(), {
+      repository,
+      env: {
+        ...process.env,
+        SLACK_WEBHOOK_URL: "https://slack.example.test/webhook",
+        NOVU_SECRET_KEY: "novu-secret",
+        NOVU_WORKFLOW_ID: "attn-workflow"
+      },
+      sendSlack: async () => ({ status: "sent", metadata: { status: 200 } }),
+      sendNovu: async () => ({ status: "sent", metadata: { status: 202 } })
+    });
+
+    expect(result.duplicated).toBe(false);
+    expect(repository.deliveries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          notification_id: result.notification.id,
+          channel: "in_app",
+          provider: "none",
+          status: "sent",
+          attempts: 1
+        }),
+        expect.objectContaining({
+          notification_id: result.notification.id,
+          channel: "slack",
+          provider: "slack_webhook",
+          status: "sent",
+          attempts: 1
+        }),
+        expect.objectContaining({
+          notification_id: result.notification.id,
+          channel: "novu",
+          provider: "novu",
+          status: "sent",
+          attempts: 1
+        })
+      ])
+    );
+  });
+
+  it("keeps normal-priority notifications in Attn only", async () => {
+    const repository = new MemoryNotificationRepository();
+
+    await ingestNotification(input({ priority: "normal" }), {
+      repository,
+      env: {
+        ...process.env,
+        SLACK_WEBHOOK_URL: "https://slack.example.test/webhook",
+        NOVU_SECRET_KEY: "novu-secret",
+        NOVU_WORKFLOW_ID: "attn-workflow"
+      },
+      sendSlack: async () => ({ status: "sent" }),
+      sendNovu: async () => ({ status: "sent" })
+    });
+
+    expect(repository.deliveries).toHaveLength(1);
+    expect(repository.deliveries[0]).toMatchObject({
+      channel: "in_app",
+      provider: "none",
+      status: "sent"
+    });
+  });
+
+  it("records skipped external delivery rows when routes are wanted but not configured", async () => {
+    const repository = new MemoryNotificationRepository();
+
+    const result = await ingestNotification(input({ priority: "critical" }), {
+      repository,
+      env: { NODE_ENV: "test" } as NodeJS.ProcessEnv,
+      sendSlack: async () => ({ status: "sent" }),
+      sendNovu: async () => ({ status: "sent" })
+    });
+
+    expect(result.notification.id).toBeTruthy();
+    expect(repository.deliveries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          channel: "slack",
+          status: "skipped",
+          attempts: 0,
+          metadata_json: expect.objectContaining({
+            reason: "slack_not_configured"
+          })
+        }),
+        expect.objectContaining({
+          channel: "novu",
+          status: "skipped",
+          attempts: 0,
+          metadata_json: expect.objectContaining({
+            reason: "novu_not_configured"
+          })
+        }),
+        expect.objectContaining({
+          channel: "push",
+          status: "skipped",
+          provider: "none",
+          metadata_json: expect.objectContaining({
+            reason: "future_push_not_configured"
+          })
+        })
+      ])
+    );
+  });
+
+  it("records delivery failure without failing notification creation", async () => {
+    const repository = new MemoryNotificationRepository();
+
+    const result = await ingestNotification(input(), {
+      repository,
+      env: {
+        ...process.env,
+        SLACK_WEBHOOK_URL: "https://slack.example.test/webhook"
+      },
+      sendSlack: async () => ({
+        status: "failed",
+        metadata: {
+          status: 500,
+          statusText: "broken"
+        }
+      }),
+      sendNovu: skipped
+    });
+
+    expect(result.notification.id).toBeTruthy();
+    expect(repository.deliveries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          notification_id: result.notification.id,
+          channel: "slack",
+          status: "failed",
+          attempts: 1,
+          last_error: "500 broken"
+        })
+      ])
+    );
+    expect(repository.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event_type: "slack_failed",
+          actor: "slack"
+        })
+      ])
+    );
   });
 
   it("requires the ingest token when configured", () => {
@@ -426,11 +840,24 @@ describe("notifications", () => {
 
     const notification = await createNotification(input(), {
       repository,
+      env: {
+        ...process.env,
+        SLACK_WEBHOOK_URL: "https://slack.example.test/webhook"
+      },
       sendSlack: async () => ({ status: "failed", metadata }),
       sendNovu: skipped
     });
 
     expect(notification.id).toBeTruthy();
+    expect(repository.deliveries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          channel: "slack",
+          status: "failed",
+          last_error: "500 broken"
+        })
+      ])
+    );
     expect(repository.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -478,11 +905,10 @@ describe("notifications", () => {
 
     await expect(getHealthPayload(async () => undefined, now)).resolves.toEqual({
       app: "attn",
+      ok: true,
       status: "ok",
-      checked_at: "2026-06-25T12:00:00.000Z",
-      database: {
-        ok: true
-      }
+      database: "ok",
+      timestamp: "2026-06-25T12:00:00.000Z"
     });
 
     await expect(
@@ -491,11 +917,97 @@ describe("notifications", () => {
       }, now)
     ).resolves.toEqual({
       app: "attn",
+      ok: false,
       status: "degraded",
-      checked_at: "2026-06-25T12:00:00.000Z",
-      database: {
-        ok: false
-      }
+      database: "unavailable",
+      timestamp: "2026-06-25T12:00:00.000Z"
     });
+  });
+
+  it("resolves a default subscriber when none is specified", async () => {
+    const repository = new MemorySubscriberRepository();
+
+    const subscriber = await resolveTargetSubscriber(undefined, {
+      repository,
+      env: {
+        NODE_ENV: "test",
+        ATTN_DEFAULT_SUBSCRIBER_EXTERNAL_ID: "default-human",
+        NOVU_SUBSCRIBER_ID: "novu-human"
+      } as NodeJS.ProcessEnv
+    });
+
+    expect(subscriber).toMatchObject({
+      external_id: "default-human",
+      novu_subscriber_id: "novu-human"
+    });
+  });
+
+  it("registers or updates a device without exposing raw tokens", async () => {
+    const subscriberRepository = new MemorySubscriberRepository();
+    const deviceRepository = new MemoryDeviceRepository();
+    const now = () => new Date("2026-06-25T12:00:00.000Z");
+
+    const first = await registerDevice(
+      {
+        platform: "ios",
+        provider: "expo",
+        device_token: "ExponentPushToken[secret-token]",
+        device_name: "iPhone",
+        metadata: { appVersion: "1.0.0" }
+      },
+      {
+        subscriberRepository,
+        deviceRepository,
+        now
+      }
+    );
+    const second = await registerDevice(
+      {
+        platform: "ios",
+        provider: "expo",
+        device_token: "ExponentPushToken[secret-token]",
+        device_name: "Renamed iPhone",
+        metadata: {}
+      },
+      {
+        subscriberRepository,
+        deviceRepository,
+        now
+      }
+    );
+
+    expect(second.device.id).toBe(first.device.id);
+    expect(deviceRepository.devices).toHaveLength(1);
+    expect(second.device.device_token_hash).toBe(
+      hashDeviceToken("ExponentPushToken[secret-token]")
+    );
+    expect(JSON.stringify(redactDevice(second.device))).not.toContain(
+      "ExponentPushToken"
+    );
+  });
+
+  it("unregisters a device by revoking it", async () => {
+    const subscriberRepository = new MemorySubscriberRepository();
+    const deviceRepository = new MemoryDeviceRepository();
+    const registered = await registerDevice(
+      {
+        platform: "android",
+        provider: "fcm",
+        device_token: "fcm-secret",
+        metadata: {}
+      },
+      {
+        subscriberRepository,
+        deviceRepository,
+        now: () => new Date("2026-06-25T12:00:00.000Z")
+      }
+    );
+
+    const revoked = await deviceRepository.revokeDevice({
+      device_id: registered.device.id,
+      revoked_at: "2026-06-25T12:05:00.000Z"
+    });
+
+    expect(revoked?.revoked_at).toBe("2026-06-25T12:05:00.000Z");
   });
 });

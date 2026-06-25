@@ -30,10 +30,15 @@ export const decisionValues = [
   "suspend"
 ] as const;
 
+export const devicePlatformValues = ["ios", "android", "web", "expo"] as const;
+export const deviceProviderValues = ["expo", "fcm", "apns", "web_push"] as const;
+
 export type NotificationPriority = (typeof notificationPriorityValues)[number];
 export type NotificationStatus = (typeof notificationStatusValues)[number];
 export type QueueBucket = (typeof queueBucketValues)[number];
 export type DecisionValue = (typeof decisionValues)[number];
+export type DevicePlatform = (typeof devicePlatformValues)[number];
+export type DeviceProvider = (typeof deviceProviderValues)[number];
 
 const requiredTrimmedString = z.string().trim().min(1);
 const optionalTrimmedString = z
@@ -95,12 +100,33 @@ export const decisionInputSchema = z.object({
   metadata: jsonObjectSchema.default({})
 });
 
+export const registerDeviceInputSchema = z.object({
+  subscriber_id: optionalTrimmedString,
+  platform: z.enum(devicePlatformValues),
+  provider: z.enum(deviceProviderValues),
+  device_token: requiredTrimmedString.max(4096),
+  device_name: optionalTrimmedString,
+  metadata: jsonObjectSchema.default({})
+});
+
+export const unregisterDeviceInputSchema = z
+  .object({
+    device_id: optionalTrimmedString,
+    provider: z.enum(deviceProviderValues).optional(),
+    device_token: optionalTrimmedString
+  })
+  .refine((value) => value.device_id || (value.provider && value.device_token), {
+    message: "Provide either device_id or provider and device_token"
+  });
+
 export type CreateNotificationInput = z.input<
   typeof createNotificationInputSchema
 >;
 export type ListNotificationsQuery = z.infer<typeof listNotificationsQuerySchema>;
 export type SnoozeInput = z.infer<typeof snoozeInputSchema>;
 export type DecisionInput = z.infer<typeof decisionInputSchema>;
+export type RegisterDeviceInput = z.infer<typeof registerDeviceInputSchema>;
+export type UnregisterDeviceInput = z.infer<typeof unregisterDeviceInputSchema>;
 
 export function formatValidationError(error: z.ZodError) {
   return {

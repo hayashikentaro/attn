@@ -47,8 +47,41 @@ export interface NotificationEventRecord {
   created_at: string;
 }
 
+export type NotificationDeliveryChannel =
+  | "slack"
+  | "novu"
+  | "push"
+  | "email"
+  | "in_app";
+export type NotificationDeliveryProvider =
+  | "slack_webhook"
+  | "novu"
+  | "expo"
+  | "fcm"
+  | "apns"
+  | "none";
+export type NotificationDeliveryStatus =
+  | "pending"
+  | "sent"
+  | "failed"
+  | "skipped";
+
+export interface NotificationDeliveryRecord {
+  id: string;
+  notification_id: string;
+  channel: NotificationDeliveryChannel;
+  provider: NotificationDeliveryProvider;
+  status: NotificationDeliveryStatus;
+  attempts: number;
+  last_error: string | null;
+  metadata_json: JsonObject;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface NotificationWithEvents extends NotificationRecord {
   events: NotificationEventRecord[];
+  deliveries: NotificationDeliveryRecord[];
 }
 
 export interface NormalizedNewNotification {
@@ -79,12 +112,34 @@ export interface NotificationEventInput {
   metadata_json?: JsonObject;
 }
 
+export interface NotificationDeliveryInput {
+  notification_id: string;
+  channel: NotificationDeliveryChannel;
+  provider: NotificationDeliveryProvider;
+  status: NotificationDeliveryStatus;
+  attempts?: number;
+  last_error?: string | null;
+  metadata_json?: JsonObject;
+}
+
+export interface NotificationDeliveryUpdateInput {
+  status: NotificationDeliveryStatus;
+  attempts: number;
+  last_error?: string | null;
+  metadata_json?: JsonObject;
+}
+
 export interface NotificationRepository {
   findDuplicateNotification(
     input: Pick<NormalizedNewNotification, "source" | "external_id" | "dedupe_key">
   ): Promise<NotificationRecord | null>;
   createNotification(input: NormalizedNewNotification): Promise<NotificationRecord>;
   createEvent(input: NotificationEventInput): Promise<NotificationEventRecord>;
+  createDelivery(input: NotificationDeliveryInput): Promise<NotificationDeliveryRecord>;
+  updateDelivery(
+    id: string,
+    input: NotificationDeliveryUpdateInput
+  ): Promise<NotificationDeliveryRecord | null>;
   updateStatusWithEvent(
     id: string,
     status: NotificationStatus,
@@ -103,6 +158,7 @@ export interface IntegrationResult {
 export interface NotificationServiceOptions {
   repository?: NotificationRepository;
   now?: () => Date;
+  env?: NodeJS.ProcessEnv;
   sendSlack?: (notification: NotificationRecord) => Promise<IntegrationResult>;
   sendNovu?: (notification: NotificationRecord) => Promise<IntegrationResult>;
 }
@@ -133,6 +189,15 @@ type DbNotificationEventRow = Omit<
 > & {
   metadata_json: JsonObject | string | null;
   created_at: Date | string;
+};
+
+type DbNotificationDeliveryRow = Omit<
+  NotificationDeliveryRecord,
+  "created_at" | "updated_at" | "metadata_json"
+> & {
+  metadata_json: JsonObject | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
 };
 
 const priorityRank: Record<NotificationPriority, number> = {
@@ -183,6 +248,15 @@ function serializeEvent(row: DbNotificationEventRow): NotificationEventRecord {
     ...row,
     metadata_json: coerceJsonObject(row.metadata_json),
     created_at: toIso(row.created_at)
+  };
+}
+
+function serializeDelivery(row: DbNotificationDeliveryRow): NotificationDeliveryRecord {
+  return {
+    ...row,
+    metadata_json: coerceJsonObject(row.metadata_json),
+    created_at: toIso(row.created_at),
+    updated_at: toIso(row.updated_at)
   };
 }
 
@@ -380,6 +454,48 @@ export function getPostgresNotificationRepository(): NotificationRepository {
       return serializeEvent(row);
     },
 
+    async createDelivery(input) {
+      const rows = (await sql`
+        insert into notification_deliveries (
+          notification_id,
+          channel,
+          provider,
+          status,
+          attempts,
+          last_error,
+          metadata_json
+        )
+        values (
+          ${input.notification_id},
+          ${input.channel},
+          ${input.provider},
+          ${input.status},
+          ${input.attempts ?? 0},
+          ${input.last_error ?? null},
+          ${JSON.stringify(input.metadata_json ?? {})}::jsonb
+        )
+        returning *
+      `) as unknown as DbNotificationDeliveryRow[];
+      const [row] = rows;
+
+      return serializeDelivery(row);
+    },
+
+    async updateDelivery(id, input) {
+      const rows = (await sql`
+        update notification_deliveries
+        set status = ${input.status},
+            attempts = ${input.attempts},
+            last_error = ${input.last_error ?? null},
+            metadata_json = ${JSON.stringify(input.metadata_json ?? {})}::jsonb
+        where id = ${id}
+        returning *
+      `) as unknown as DbNotificationDeliveryRow[];
+      const [row] = rows;
+
+      return row ? serializeDelivery(row) : null;
+    },
+
     async updateStatusWithEvent(id, status, snoozedUntil, event) {
       return sql.begin(async (tx) => {
         const rows = (await tx`
@@ -434,9 +550,17 @@ export function getPostgresNotificationRepository(): NotificationRepository {
         order by created_at desc
       `) as unknown as DbNotificationEventRow[];
 
+      const deliveryRows = (await sql`
+        select *
+        from notification_deliveries
+        where notification_id = ${id}
+        order by created_at asc
+      `) as unknown as DbNotificationDeliveryRow[];
+
       return {
         ...serializeNotification(notificationRow),
-        events: eventRows.map(serializeEvent)
+        events: eventRows.map(serializeEvent),
+        deliveries: deliveryRows.map(serializeDelivery)
       };
     },
 
@@ -526,10 +650,19 @@ async function recordDuplicateReceived(
   });
 }
 
+function getItemUrl(notification: NotificationRecord, env: NodeJS.ProcessEnv) {
+  const baseUrl = env.APP_BASE_URL || env.NEXT_PUBLIC_APP_BASE_URL;
+  if (!baseUrl) {
+    return null;
+  }
+
+  return `${baseUrl.replace(/\/$/, "")}/items/${notification.id}`;
+}
+
 async function recordIntegrationResult(
   repository: NotificationRepository,
   notificationId: string,
-  integration: "slack" | "novu",
+  integration: "slack" | "novu" | "push" | "email",
   result: IntegrationResult
 ) {
   if (result.status === "skipped") {
@@ -548,6 +681,201 @@ async function recordIntegrationResult(
     });
   } catch {
     // Side-channel event recording must not make ingestion fail after storage.
+  }
+}
+
+function isSlackConfigured(options: NotificationServiceOptions) {
+  const env = options.env ?? process.env;
+  return Boolean(env.SLACK_WEBHOOK_URL);
+}
+
+function isNovuConfigured(options: NotificationServiceOptions) {
+  const env = options.env ?? process.env;
+  return Boolean(env.NOVU_SECRET_KEY && env.NOVU_WORKFLOW_ID);
+}
+
+interface DeliveryRoute {
+  channel: Exclude<NotificationDeliveryChannel, "in_app">;
+  provider: NotificationDeliveryProvider;
+  shouldAttempt: boolean;
+  reason: string;
+}
+
+function getExternalDeliveryRoutes(
+  notification: NotificationRecord,
+  options: NotificationServiceOptions
+): DeliveryRoute[] {
+  const wantsSlack =
+    notification.priority === "critical" ||
+    notification.priority === "high" ||
+    notification.kind === "decision_request" ||
+    notification.kind === "checkpoint";
+  const wantsNovu = wantsSlack;
+  const routes: DeliveryRoute[] = [];
+
+  if (wantsSlack) {
+    routes.push({
+      channel: "slack",
+      provider: "slack_webhook",
+      shouldAttempt: isSlackConfigured(options),
+      reason: isSlackConfigured(options)
+        ? "configured_route"
+        : "slack_not_configured"
+    });
+  }
+
+  if (wantsNovu) {
+    routes.push({
+      channel: "novu",
+      provider: "novu",
+      shouldAttempt: isNovuConfigured(options),
+      reason: isNovuConfigured(options) ? "configured_route" : "novu_not_configured"
+    });
+  }
+
+  if (notification.priority === "critical") {
+    routes.push({
+      channel: "push",
+      provider: "none",
+      shouldAttempt: false,
+      reason: "future_push_not_configured"
+    });
+  }
+
+  return routes;
+}
+
+function getDeliveryStatus(result: IntegrationResult): NotificationDeliveryStatus {
+  if (result.status === "sent") {
+    return "sent";
+  }
+
+  if (result.status === "failed") {
+    return "failed";
+  }
+
+  return "skipped";
+}
+
+function getSafeLastError(metadata: JsonObject | undefined) {
+  if (!metadata) {
+    return null;
+  }
+
+  const status = metadata.status;
+  const statusText = metadata.statusText;
+  const message = metadata.message;
+
+  if (typeof status === "number" || typeof status === "string") {
+    return [String(status), typeof statusText === "string" ? statusText : ""]
+      .filter(Boolean)
+      .join(" ")
+      .slice(0, 500);
+  }
+
+  if (typeof message === "string") {
+    return message.slice(0, 500);
+  }
+
+  return null;
+}
+
+async function recordAttnDelivery(
+  repository: NotificationRepository,
+  notification: NotificationRecord
+) {
+  await repository.createDelivery({
+    notification_id: notification.id,
+    channel: "in_app",
+    provider: "none",
+    status: "sent",
+    attempts: 1,
+    metadata_json: {
+      bucket: getBucketForNotification(notification),
+      reason: "attn_queue_created",
+      item_url: getItemUrl(notification, process.env)
+    }
+  });
+}
+
+async function processExternalDelivery(
+  repository: NotificationRepository,
+  notification: NotificationRecord,
+  route: DeliveryRoute,
+  options: NotificationServiceOptions
+) {
+  const delivery = await repository.createDelivery({
+    notification_id: notification.id,
+    channel: route.channel,
+    provider: route.provider,
+    status: route.shouldAttempt ? "pending" : "skipped",
+    attempts: 0,
+    metadata_json: {
+      reason: route.reason,
+      item_url: getItemUrl(notification, options.env ?? process.env)
+    }
+  });
+
+  if (!route.shouldAttempt) {
+    return;
+  }
+
+  let result: IntegrationResult;
+  try {
+    result =
+      route.channel === "slack"
+        ? await (options.sendSlack ?? sendSlackNotification)(notification)
+        : await (options.sendNovu ?? sendNovuNotification)(notification);
+  } catch (error) {
+    result = {
+      status: "failed",
+      metadata: {
+        message:
+          error instanceof Error
+            ? error.message.slice(0, 500)
+            : "Unknown delivery error"
+      }
+    };
+  }
+
+  await repository.updateDelivery(delivery.id, {
+    status: getDeliveryStatus(result),
+    attempts: 1,
+    last_error: result.status === "failed" ? getSafeLastError(result.metadata) : null,
+    metadata_json: {
+      reason: route.reason,
+      item_url: getItemUrl(notification, options.env ?? process.env),
+      ...(result.metadata ?? {})
+    }
+  });
+
+  await recordIntegrationResult(repository, notification.id, route.channel, result);
+}
+
+async function processDeliveries(
+  repository: NotificationRepository,
+  notification: NotificationRecord,
+  options: NotificationServiceOptions
+) {
+  try {
+    await recordAttnDelivery(repository, notification);
+
+    for (const route of getExternalDeliveryRoutes(notification, options)) {
+      await processExternalDelivery(repository, notification, route, options);
+    }
+  } catch (error) {
+    try {
+      await repository.createEvent({
+        notification_id: notification.id,
+        event_type: "delivery_failed",
+        actor: "system",
+        metadata_json: {
+          error: getSafeLastError(coerceJsonObject(error))
+        }
+      });
+    } catch {
+      // Delivery bookkeeping must not make notification creation fail.
+    }
   }
 }
 
@@ -588,20 +916,7 @@ export async function ingestNotification(
     throw error;
   }
 
-  const slackResult = await (options.sendSlack ?? sendSlackNotification)(
-    notification
-  );
-  await recordIntegrationResult(
-    repository,
-    notification.id,
-    "slack",
-    slackResult
-  );
-
-  const novuResult = await (options.sendNovu ?? sendNovuNotification)(
-    notification
-  );
-  await recordIntegrationResult(repository, notification.id, "novu", novuResult);
+  await processDeliveries(repository, notification, options);
 
   return {
     notification,

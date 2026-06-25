@@ -3,11 +3,10 @@ import { checkDatabaseConnection } from "@/lib/db";
 
 export interface HealthPayload {
   app: "attn";
+  ok: boolean;
   status: "ok" | "degraded";
-  checked_at: string;
-  database: {
-    ok: boolean;
-  };
+  database: "ok" | "unavailable";
+  timestamp: string;
 }
 
 export async function getHealthPayload(
@@ -25,11 +24,10 @@ export async function getHealthPayload(
 
   return {
     app: "attn",
+    ok: databaseOk,
     status: databaseOk ? "ok" : "degraded",
-    checked_at: now().toISOString(),
-    database: {
-      ok: databaseOk
-    }
+    database: databaseOk ? "ok" : "unavailable",
+    timestamp: now().toISOString()
   };
 }
 

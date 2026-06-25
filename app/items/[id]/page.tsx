@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { EventHistory } from "@/components/EventHistory";
+import { DeliveryHistory, EventHistory } from "@/components/EventHistory";
 import { NotificationActions } from "@/components/NotificationActions";
 import { PriorityBadge } from "@/components/PriorityBadge";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -175,6 +175,11 @@ export default async function ItemPage({ params }: ItemPageProps) {
               {JSON.stringify(notification.payload_json, null, 2)}
             </pre>
           </details>
+        </section>
+
+        <section className="mt-8 space-y-3">
+          <h2 className="text-xl font-semibold text-zinc-950">Delivery attempts</h2>
+          <DeliveryHistory deliveries={notification.deliveries} />
         </section>
 
         <section className="mt-8 space-y-3">
